@@ -75,7 +75,7 @@ import { afterNativeDialog, bounceActivation } from "./nativedialog.js";
 import { closeOnBackdropClick } from "./backdrop.js";
 import { holdNativeLink } from "./nativelink.js";
 import { refreshToolbarTitles } from "./toolbar.js";
-import { resolvedTheme, setThemePreference } from "./theme.js";
+import { setThemePreference, themePreference } from "./theme.js";
 import {
   GROUPS as VIEWER_GROUPS,
   MODIFIERS,
@@ -630,15 +630,22 @@ ${VIEWER_GROUPS.map(
         <section class="settings-panel" data-panel="application" hidden>
           <p class="settings-group">Appearance</p>
           <p class="info-note">
-            Unticked and untouched, the application follows the desktop's own
-            light or dark setting and changes with it. Ticking or unticking pins
-            it, and it stops following. It is the whole window - editor, viewer
-            and console - rather than a theme per surface, which is why it is
-            here rather than on the Viewer tab.
+            System follows the desktop's own light or dark setting and changes
+            with it; Dark and Light pin one. It is the whole window - editor,
+            viewer and console - rather than a theme per surface, which is why
+            it is here rather than on the Viewer tab.
           </p>
-          <label class="settings-check">
-            <input type="checkbox" id="settings-dark-mode" />
-            <span>Dark mode</span>
+          <label class="settings-option">
+            <input type="radio" name="settings-theme" value="dark" />
+            <span>Dark</span>
+          </label>
+          <label class="settings-option">
+            <input type="radio" name="settings-theme" value="light" />
+            <span>Light</span>
+          </label>
+          <label class="settings-option">
+            <input type="radio" name="settings-theme" value="system" />
+            <span>System</span>
           </label>
 
           <p class="settings-group">Debug console</p>
@@ -899,7 +906,7 @@ ${VIEWER_GROUPS.map(
   // which is where all three are named.
   document.getElementById("settings-log-path").textContent =
     consolePath() === null ? "" : `Written to ${consolePath()}`;
-  document.getElementById("settings-dark-mode").checked = resolvedTheme() === "dark";
+  document.querySelector(`input[name="settings-theme"][value="${themePreference()}"]`).checked = true;
   document.getElementById("settings-line-length").value = String(formatLineLength());
   document.getElementById("settings-format-on-save").checked = formatOnSave();
   document.getElementById("settings-cell-actions").checked = cellActionsShown();
@@ -988,13 +995,11 @@ ${VIEWER_GROUPS.map(
       await setSetting(LINE_LENGTH_KEY, usableLineLength(typedLength));
     }
 
-    // Only when it disagrees with what is on screen. Otherwise opening the
-    // dialog and pressing Apply would pin a preference that had been following
-    // the desktop, and the theme would stop tracking it for reasons the user
-    // never asked for.
-    const wantsDark = document.getElementById("settings-dark-mode").checked;
-    if (wantsDark !== (resolvedTheme() === "dark")) {
-      await setThemePreference(wantsDark ? "dark" : "light");
+    // The preference itself, not the theme in force: System stays System
+    // through an Apply, so the window keeps following the desktop.
+    const wantedTheme = document.querySelector('input[name="settings-theme"]:checked').value;
+    if (wantedTheme !== themePreference()) {
+      await setThemePreference(wantedTheme);
     }
 
     const onSave = document.getElementById("settings-format-on-save").checked;
