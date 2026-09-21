@@ -20,7 +20,7 @@ import sys
 import threading
 import unittest
 
-from build123d_studio import inspector
+from build123d_studio import Param, inspector, ui
 
 NESTED = dict(
     a=12,
@@ -769,6 +769,84 @@ class InspectorTest(NamespaceFixture, unittest.TestCase):
 
     def test_an_empty_path_is_answered_rather_than_raised(self):
         self.assertIn("error", self.detail([]))
+
+
+class UiModelsTest(NamespaceFixture, unittest.TestCase):
+    """The parameter pane's kernel half: which functions it lists and what a row says."""
+
+    def ui_models(self):
+        return json.loads(inspector.ui_models())
+
+    def test_a_decorated_function_is_listed_with_its_parameters_flattened(self):
+        @ui({"Holders": {"count": Param(desc="How many", interval=(3, 14))}, "wanted": Param()})
+        def stand(count: int = 7, wanted: bool = True):
+            return count
+
+        self.given(stand=stand)
+        models = self.ui_models()
+
+        self.assertEqual(list(models), ["stand"])
+        self.assertEqual(
+            models["stand"],
+            [
+                {
+                    "name": "count",
+                    "type": "int",
+                    "default": 7,
+                    "group": "Holders",
+                    "desc": "How many",
+                    "interval": [3, 14],
+                    "choice": None,
+                    "step": 1,
+                },
+                {
+                    "name": "wanted",
+                    "type": "bool",
+                    "default": True,
+                    "group": "",
+                    "desc": "",
+                    "interval": None,
+                    "choice": None,
+                    "step": 1,
+                },
+            ],
+        )
+
+    def test_only_functions_made_by_the_decorator_are_models(self):
+        """A `ui` attribute on anything else is somebody else's, and an undecorated function has none."""
+
+        class WithUi:
+            ui = {"a": (int, 1, "", Param())}
+
+        def plain(a: int = 1):
+            return a
+
+        self.given(klass=WithUi, instance=WithUi(), plain=plain, a_dict={"ui": 1})
+        self.assertEqual(self.ui_models(), {})
+
+    def test_a_missing_default_arrives_as_null(self):
+        @ui({"count": Param()})
+        def stand(count: int):
+            return count
+
+        self.given(stand=stand)
+        self.assertIsNone(self.ui_models()["stand"][0]["default"])
+
+    def test_a_default_the_pane_cannot_show_arrives_as_text(self):
+        """Rather than breaking the whole reply, which json.dumps would otherwise do."""
+
+        class Vector:
+            def __str__(self):
+                return "Vector(1, 2, 3)"
+
+        origin = Vector()
+
+        @ui({"origin": Param()})
+        def stand(origin: Vector = origin):
+            return origin
+
+        self.given(stand=stand)
+        self.assertEqual(self.ui_models()["stand"][0]["default"], "Vector(1, 2, 3)")
 
 
 class ConcurrentMutationTest(NamespaceFixture, unittest.TestCase):

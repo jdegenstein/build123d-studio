@@ -81,6 +81,7 @@ import { handleKey } from "./titlebar/titlebar.js";
 import { followWindowFocus } from "./nativedialog.js";
 import { initViewer, showLogo } from "./viewer/viewer.js";
 import { initVariables, selectionFor } from "./vars/explorer.js";
+import { hasModels, initParams, toggleParamsPanel } from "./params/panel.js";
 import { initCameraShortcut } from "./camerashortcut.js";
 import { awaitKernelRestart, showSettings } from "./settings.js";
 import { showInfo } from "./info.js";
@@ -606,6 +607,8 @@ async function main() {
   });
   initViewer();
   initVariables();
+  // The menu's toggle is greyed without a model, so it follows the panel.
+  initParams({ onChange: () => void refreshMenu() });
   initCameraShortcut();
   initToolbar();
   const console_ = initConsole();
@@ -695,6 +698,7 @@ async function main() {
   watchSession({
     folder: () => currentFolder() !== null,
     tabs: () => bufferKeys().length > 0,
+    model: hasModels,
   });
 
   await initMenu({
@@ -710,6 +714,7 @@ async function main() {
     [MENU.CLOSE_FOLDER]: () => withMenu(closeFolder),
     [MENU.TOGGLE_SIDEBAR]: toggleSidebar,
     [MENU.TOGGLE_BOTTOM]: toggleBottomRow,
+    [MENU.TOGGLE_PARAMS]: toggleParamsPanel,
     [MENU.SAVE]: () => saveFile(),
     [MENU.SAVE_AS]: () => saveFile({ saveAs: true }),
     [MENU.SAVE_ALL]: () => withMenu(saveAll),

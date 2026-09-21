@@ -2160,6 +2160,189 @@ html body {
   }
 }
 
+/* = = = Parameter panel = = = */
+
+/* A floating window inside the application's: fixed, so it stays where it was
+   dragged whatever the panes underneath do, and above the viewer's own
+   overlays (up to 200) and the tooltips (300) - it is a control the user
+   placed, and the viewer must not draw over it. Below every modal, which is
+   the point of a modal. */
+.params-panel {
+  position: fixed;
+  z-index: 500;
+  display: flex;
+  flex-direction: column;
+  width: 320px;
+  max-height: calc(100vh - 32px);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg-pane);
+  box-shadow: 0 12px 40px rgb(0 0 0 / 35%);
+  font-size: 12px;
+}
+
+.params-panel[hidden] {
+  display: none;
+}
+
+/* The grab handle. Everything in it that is not a control moves the panel. */
+.params-header {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 6px 6px 10px;
+  border-bottom: 1px solid var(--border);
+  cursor: move;
+  user-select: none;
+}
+
+.params-title {
+  flex: 1 1 auto;
+  font-weight: 600;
+  font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+}
+
+.params-model {
+  flex: 1 1 auto;
+  min-width: 0;
+  cursor: default;
+}
+
+/* The viewer's own Clip, Material and Zebra tabs carry the same small R. */
+.params-reset {
+  width: 22px;
+  font-weight: 600;
+}
+
+.params-body {
+  flex: 1 1 auto;
+  overflow: auto;
+  padding: 4px 10px 10px;
+}
+
+.params-group {
+  margin: 10px 0 4px;
+  color: var(--fg-dim);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+/* Label left, control right, as the Viewer settings tab lays its rows out:
+   a dozen parameters are a table to scan, not a form to read. */
+.params-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 140px;
+  align-items: center;
+  gap: 8px;
+  padding: 3px 0;
+}
+
+.params-label {
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.params-input,
+.params-select {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 3px 6px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--bg);
+  color: var(--fg);
+  font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  font-size: 12px;
+}
+
+.params-input.params-invalid {
+  border-color: var(--error-fg);
+}
+
+/* The field and its two step buttons, stacked to the field's height so the
+   row stays as tall as a text field. */
+.params-number {
+  display: flex;
+  align-items: stretch;
+  gap: 2px;
+}
+
+.params-number .params-input {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.params-steps {
+  display: flex;
+  flex: 0 0 auto;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.params-step {
+  display: flex;
+  flex: 1 1 0;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  min-height: 11px;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  background: var(--bg-pane);
+  color: var(--fg);
+  cursor: pointer;
+}
+
+.params-step:hover {
+  background: var(--hover);
+}
+
+.params-step:active {
+  background: var(--selected);
+}
+
+/* The arrow is a bordered box with three transparent sides: the same size in
+   every font and every theme, and currentColor follows the button's text. */
+.params-step::before {
+  content: "";
+  width: 0;
+  height: 0;
+  border-left: 4px solid transparent;
+  border-right: 4px solid transparent;
+}
+
+.params-step-up::before {
+  border-bottom: 5px solid currentColor;
+}
+
+.params-step-down::before {
+  border-top: 5px solid currentColor;
+}
+
+.params-slider {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.params-slider input {
+  flex: 1 1 auto;
+  min-width: 0;
+  margin: 0;
+}
+
+.params-readout {
+  flex: 0 0 3.5em;
+  text-align: right;
+  font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  font-variant-numeric: tabular-nums;
+}
+
 /* = = = Confirmation dialog = = = */
 
 .confirm-overlay {

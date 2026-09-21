@@ -29,6 +29,7 @@ pinned environment: 1200 rows in, 1001 out, the last one Ellipsis. A single
 string has nothing for the printer to truncate.
 """
 
+import inspect
 import json
 import reprlib
 import sys
@@ -615,6 +616,54 @@ def variables():
             "expandable": False,
         })
     return json.dumps(rows)
+
+
+def ui_models():
+    """The parameter UI of every @ui-decorated function, as a JSON string.
+
+    One entry per model function found in the namespace, keyed by the name it
+    is bound to, listing its parameters in signature order with the type, the
+    default, the group and the Param - flattened, so the pane reads `group`,
+    `desc`, `interval`, `choice` and `step` beside `name`, `type` and
+    `default`.
+
+    Cheap in the sense variables() is: one attribute read per name, and only a
+    function that carries a dict called `ui` is looked at further. A string
+    for the same reason as there.
+    """
+    namespace = sys.modules["__main__"].__dict__
+    models = {}
+    for name, value in list(namespace.items()):
+        # Only what the decorator made. A method or a class with a `ui`
+        # attribute of its own is not a model, and a dict called `ui` on
+        # something that cannot be called could not be run from the pane.
+        if isinstance(value, types.FunctionType) is False:
+            continue
+        spec = getattr(value, "ui", None)
+        if isinstance(spec, dict) is False:
+            continue
+        parameters = []
+        for parameter, (kind, default, group, param) in spec.items():
+            # A parameter without a default has to be filled in before the
+            # model can run at all; the pane sees null and asks for a value.
+            if default is inspect.Parameter.empty:
+                default = None
+            parameters.append(
+                {
+                    "name": parameter,
+                    "type": getattr(kind, "__name__", str(kind)),
+                    "default": default,
+                    "group": group,
+                    "desc": param.desc,
+                    "interval": param.interval,
+                    "choice": param.choice,
+                    "step": param.step,
+                }
+            )
+        models[str(name)] = parameters
+    # default=str, so that a default the pane cannot show as itself - a Vector,
+    # a Path - still arrives as text rather than breaking the whole reply.
+    return json.dumps(models, default=str)
 
 
 def _build123d_details(value):

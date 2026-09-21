@@ -1074,6 +1074,12 @@ class Sidecar:
         rows = self._inspect(f"{INSPECTOR}.variables()", timeout=timeout)
         if rows is not None:
             self.channel.send("vars.data", variables=rows)
+        # The parameter panel's models, read beside the namespace for the same
+        # reason the defaults are: a @ui function appears, changes or goes with
+        # the Run that defined it, and the panel has to say what is there now.
+        models = self._inspect(f"{INSPECTOR}.ui_models()", timeout=timeout)
+        if models is not None:
+            self.channel.send("ui.models", models=models)
         # The viewer defaults the toolbar shows a control for, read on the same
         # occasions as the namespace: they move with it - a script's own
         # set_defaults, a line typed in the console, a restart - and the only

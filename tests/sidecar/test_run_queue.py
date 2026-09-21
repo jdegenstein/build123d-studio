@@ -180,6 +180,21 @@ class RunQueueTest(unittest.TestCase):
         self.assertIn(("vars.data", {"variables": []}), self.channel.sent)
         self.assertIn(("viewer.defaults", {"reset_camera": "KEEP"}), self.channel.sent)
 
+    def test_a_refresh_carries_the_parameter_models_beside_the_namespace(self):
+        """A @ui function appears and goes with the Run that defined it, so the
+        panel reads on the same occasions the explorer does."""
+        self.sidecar.kernel.answers = {
+            ".variables()": "[]",
+            ".ui_models()": '{"stand": [{"name": "count", "type": "int", "default": 7}]}',
+            ".viewer_defaults()": "{}",
+        }
+        self.sidecar.refresh_variables()
+
+        self.assertIn(
+            ("ui.models", {"models": {"stand": [{"name": "count", "type": "int", "default": 7}]}}),
+            self.channel.sent,
+        )
+
     def test_the_defaults_are_not_read_while_the_warm_up_imports(self):
         """The startup refresh runs during the warm-up and its namespace read
         merely times out; a defaults read then reached into a module the main

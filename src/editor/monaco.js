@@ -161,6 +161,7 @@ import { COMMANDS } from "../keys.js";
 import { bindingsFor } from "../keybindings.js";
 import * as ipc from "../ipc.js";
 import * as log from "../log.js";
+import { runFromEditor } from "../params/panel.js";
 import { onThemeChange, resolvedTheme } from "../theme.js";
 
 // Monaco needs a worker to do anything non-trivial off the main thread. Python
@@ -235,6 +236,9 @@ export function execute(code) {
     return;
   }
   log.info(`Run: sending ${code.length} chars to the kernel`);
+  // A closed parameter panel comes back for the model this Run defines - a
+  // Run is the user asking for it again; an idle from anything else is not.
+  runFromEditor();
   // Whatever this prints lands in the console, so the console is what to look
   // at. Without this a run after a debug session would put its output behind
   // whichever tab happened to be showing, which is the same disappearing act
