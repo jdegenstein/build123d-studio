@@ -2,6 +2,12 @@
 
 What changed in each release, for the people using it. Anything not visible from the outside is in the git log.
 
+## 0.8.0 (2026-09-21)
+
+**New features**
+
+- **A parameter panel for your model.** Put `@ui({...})` from `build123d_studio` on the function that builds your model, and Studio opens a small floating window with a control per parameter — a checkbox, a dropdown, a slider, or a number field with step buttons — grouped and labelled as the decorator says. Every change calls the function again and shows the result; **R** puts the values back to the script's, `Escape` or ✕ closes the window and **View ▸ Toggle Parameters** brings it back. The signature stays plain Python: types and defaults come from it, and the decorator adds only what a signature cannot say. See the Parameters chapter in the documentation and `examples/candle_stand.py`.
+
 ## 0.7.1 (2026-09-18)
 
 **New features**
