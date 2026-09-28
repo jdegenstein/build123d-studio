@@ -1430,6 +1430,45 @@ test.describe("the language features reach the screen", () => {
     await expect(page.locator(".suggest-widget")).toContainText("SENTINEL_MATCH");
   });
 
+  test("a typed word opens the list, and Box is in it", async ({ page }) => {
+    // The other way the list opens: no trigger character, Monaco asking on
+    // its own as a word grows. Answered with the head of what the sidecar
+    // really sent for "b = Bo" - the language server's ranking, each entry
+    // carrying the span it replaces - because a list built by hand proves the
+    // provider is asked and not that its answer survives the filter.
+    //
+    // Green at 9ca9da6 and red at 3b8341a: the TOML grammar, registered at
+    // import through calls that initialise Monaco's services, froze that set
+    // before the suggest contribution had registered the service it depends
+    // on. The controller then failed to construct, silently, and no provider
+    // was ever asked - by this path or by the dot above.
+    const { sidecar } = await openApp(page);
+
+    const offered = [
+      "BallJoint", "BaseCurveObject", "BaseEdgeObject", "BaseException", "BaseExceptionGroup",
+      "BaseLineObject", "BasePartObject", "BaseSketchObject", "Bezier", "BlockingIOError",
+      "BoundBox", "Box", "bool", "bounding_box",
+    ];
+    const asked = [];
+    sidecar.answer("editor.complete", (frame) => {
+      asked.push(frame);
+      return {
+        matches: offered,
+        types: offered.map((text) => ({
+          text, type: "class", signature: "", start: 5, end: frame.column,
+        })),
+        truncated: false,
+      };
+    });
+
+    await caretToEnd(page);
+    await page.keyboard.type("\nbb = Bo");
+
+    await expect(page.locator(".suggest-widget")).toBeVisible();
+    await expect(page.locator(".suggest-widget")).toContainText("Box");
+    expect(asked.length, "the provider was asked at all").toBeGreaterThan(0);
+  });
+
   test("the parameter hints popup shows the signature", async ({ page }) => {
     const { sidecar } = await openApp(page);
 
@@ -1514,6 +1553,23 @@ test.describe("the language features reach the screen", () => {
     });
 
     await expect(page.locator(".squiggly-error, .squiggly-warning").first()).toBeVisible();
+
+    // And hovering it explains it, with "View Problem" in the hover's status
+    // bar. That action comes from the gotoError contribution, whose service was
+    // the second thing the services-frozen-too-early defect took: Monaco
+    // catches a contribution that cannot be built, so the hover still opened
+    // and only the action was missing - and an error in the log was the whole
+    // of the evidence. The language server's own hover is answered empty, or
+    // the widget says "Loading..." for the six seconds that request is allowed.
+    sidecar.answer("editor.hover", () => ({ hover: null }));
+    const squiggle = await page.locator(".squiggly-error, .squiggly-warning").first().boundingBox();
+    const [x, y] = [squiggle.x + squiggle.width / 2, squiggle.y + squiggle.height / 2];
+    await page.mouse.move(x, y);
+    await page.mouse.move(x + 1, y);
+    const hover = page.locator(".monaco-hover:not(.hidden)");
+    await expect(hover).toBeVisible();
+    await expect(hover).toContainText("SENTINEL_PROBLEM");
+    await expect(hover).toContainText("View Problem");
   });
 
   test("and an empty list takes the squiggles away again", async ({ page }) => {
@@ -1603,5 +1659,98 @@ test.describe("Alt-Enter while the find widget is open", () => {
     await page.keyboard.press("Alt+Enter");
 
     await expect.poll(() => ran(sidecar).length).toBeGreaterThan(0);
+  });
+});
+
+test.describe("files that are not Python", () => {
+  // JSON and YAML are highlighted as themselves and never reach the Python
+  // tooling; a save sends nothing to ruff. Monaco writes the language of the
+  // model on screen onto the host element it was created in, as data-mode-id.
+  // Proof, at writing: with the language-id guard removed from
+  // formatBufferFor, the second test fails on an editor.format frame arriving.
+
+  test("a JSON file opens as JSON, a YAML file as YAML", async ({ page }) => {
+    await open(page, {
+      files: { ...FILES, [`${PROJECT}/settings.json`]: '{"a": 1}\n', [`${PROJECT}/ci.yml`]: "a: 1\n" },
+      settings: {
+        workspace: {
+          folder: PROJECT,
+          tabs: [{ path: `${PROJECT}/settings.json`, caret: null }, { path: `${PROJECT}/ci.yml`, caret: null }],
+          active: `${PROJECT}/settings.json`,
+        },
+      },
+    });
+    await expect(page.locator(".tab-active .tab-label")).toHaveText("settings.json");
+    await expect(page.locator("#editor-host")).toHaveAttribute("data-mode-id", "json");
+
+    await page.locator(".tab", { hasText: "ci.yml" }).click();
+    await expect(page.locator(".tab-active .tab-label")).toHaveText("ci.yml");
+    await expect(page.locator("#editor-host")).toHaveAttribute("data-mode-id", "yaml");
+  });
+
+  test("a TOML file opens as TOML, with its comment and its table coloured apart", async ({ page }) => {
+    // Our own grammar (toml.js): the tokens it produces reach the screen as
+    // Monaco's mtk classes, and a comment, a table header and a string must
+    // not all come out the same colour - which is what a grammar that failed
+    // to register would give.
+    const TOML = '# build\n[project]\nname = "studio"\nversion = 1\n';
+    await open(page, {
+      files: { ...FILES, [`${PROJECT}/pyproject.toml`]: TOML },
+      settings: {
+        workspace: { folder: PROJECT, tabs: [{ path: `${PROJECT}/pyproject.toml`, caret: null }], active: `${PROJECT}/pyproject.toml` },
+      },
+    });
+    await expect(page.locator("#editor-host")).toHaveAttribute("data-mode-id", "toml");
+    const classes = await page.evaluate(() =>
+      [...document.querySelectorAll(".monaco-editor .view-line")].map((line) =>
+        [...line.querySelectorAll("span[class]")].map((s) => s.className).join(" ")));
+    // Four lines, and the comment's class differs from the table's and the
+    // string's: three token kinds among them, not one.
+    const kinds = new Set(classes.join(" ").split(/\s+/).filter((c) => /^mtk\d+$/.test(c)));
+    expect(kinds.size).toBeGreaterThanOrEqual(3);
+  });
+
+  test("JSONC - comments and trailing commas - draws no error, a real one still does", async ({ page }) => {
+    // snippets.json is the file people edit by hand, and it is what jsonc-
+    // parser reads: comments and trailing commas throughout.
+    // Proof, at writing: with the setDiagnosticsOptions call removed, this
+    // fails on the squiggles under the comment.
+    const JSONC = '{\n  // the shipped set\n  "a": [1, 2,],\n}\n';
+    await open(page, {
+      files: { ...FILES, [`${PROJECT}/snippets.json`]: JSONC },
+      settings: {
+        workspace: { folder: PROJECT, tabs: [{ path: `${PROJECT}/snippets.json`, caret: null }], active: `${PROJECT}/snippets.json` },
+      },
+    });
+    await expect(page.locator("#editor-host")).toHaveAttribute("data-mode-id", "json");
+    // The service answers from a worker; give it a moment, then hold that
+    // nothing was marked.
+    await page.waitForTimeout(1500);
+    await expect(page.locator(".squiggly-error, .squiggly-warning")).toHaveCount(0);
+
+    // A genuine error is still an error.
+    await page.locator(".monaco-editor .view-lines").first().click();
+    await page.keyboard.press("Meta+End");
+    await page.keyboard.type("}");
+    await expect(page.locator(".squiggly-error").first()).toBeVisible();
+  });
+
+  test("saving one sends nothing to ruff", async ({ page }) => {
+    const { sidecar } = await open(page, {
+      files: { ...FILES, [`${PROJECT}/settings.json`]: '{"a": 1}\n' },
+      settings: {
+        workspace: { folder: PROJECT, tabs: [{ path: `${PROJECT}/settings.json`, caret: null }], active: `${PROJECT}/settings.json` },
+      },
+    });
+    await expect(page.locator(".tab-active .tab-label")).toHaveText("settings.json");
+    await page.locator(".monaco-editor .view-lines").first().click();
+    await page.keyboard.press("End");
+    await page.keyboard.type(" ");
+    await page.keyboard.press("Meta+s");
+
+    await expect
+      .poll(() => page.evaluate((p) => String(globalThis.__NEUTRALINO_STUB__.wrote(p) ?? ""), `${PROJECT}/settings.json`))
+      .toContain('{"a": 1}');
+    expect(sidecar.received.filter((frame) => frame.type === "editor.format")).toHaveLength(0);
   });
 });

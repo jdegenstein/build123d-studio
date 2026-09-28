@@ -262,13 +262,14 @@ test.describe("the Editor tab", () => {
     expect(stored.theme, "Apply pinned a theme nobody asked it to").toBeUndefined();
   });
 
-  test("and changing it pins the one now showing", async ({ page }) => {
+  test("and choosing Dark or Light pins it", async ({ page }) => {
     await openSettings(page);
     await page.locator("#tab-application").click();
-    const box = page.locator("#settings-dark-mode");
-    const wasDark = await box.isChecked();
+    // Untouched, System is what is chosen: the application follows the desktop.
+    await expect(page.locator('input[name="settings-theme"][value="system"]')).toBeChecked();
+    const wasDark = await page.evaluate(() => document.documentElement.dataset.theme === "dark");
 
-    await box.setChecked(!wasDark);
+    await page.locator(`input[name="settings-theme"][value="${wasDark ? "light" : "dark"}"]`).check();
     await page.locator("#settings-apply").click();
 
     await expect

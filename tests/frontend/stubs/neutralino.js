@@ -244,9 +244,11 @@ export const filesystem = {
       missing(path);
     }
     const contents = files.get(path);
+    // A string is text; an array is bytes a test seeded through the harness,
+    // which crosses as JSON and so cannot carry an ArrayBuffer itself.
     const bytes = typeof contents === "string"
       ? new TextEncoder().encode(contents).buffer
-      : contents;
+      : Array.isArray(contents) ? new Uint8Array(contents).buffer : contents;
     if (options === null) {
       return bytes;
     }
@@ -445,9 +447,20 @@ export const os = {
     return globalThis.__HARNESS__?.env?.[name] ?? "";
   },
 
+  async getEnvs() {
+    return { ...(globalThis.__HARNESS__?.env ?? {}) };
+  },
+
   async setEnv() {},
 
   async showMessageBox(title, detail, choices, kind) {
+    // What the real one does with a non-string, minus the abort: Neutralino
+    // reads title and content with get<string>() and terminates the process
+    // on anything else. Refused before it is recorded, so a test that expects
+    // the box to have been shown fails the way the application would have.
+    if (typeof title !== "string" || typeof detail !== "string") {
+      throw new TypeError(`showMessageBox needs strings, got ${typeof title} and ${typeof detail}`);
+    }
     record("showMessageBox", [title, detail, choices, kind]);
     return dialogAnswers.length > 0 ? dialogAnswers.shift() : "OK";
   },
@@ -563,6 +576,15 @@ export const os = {
 
   async updateSpawnedProcess(id, action) {
     record("updateSpawnedProcess", [id, action]);
+  },
+
+  // What a previous page of this window left behind, as a test declares it:
+  // spawned processes belong to the application, and a reloaded page inherits
+  // them. The application asks before spawning anything of its own, so this
+  // answers the harness's list and nothing this page has started.
+  async getSpawnedProcesses() {
+    record("getSpawnedProcesses", []);
+    return (globalThis.__HARNESS_PROCESSES__?.leftovers ?? []).map((p) => ({ ...p }));
   },
 };
 
@@ -680,6 +702,25 @@ export const computer = {
   async getDisplays() {
     record("getDisplays", []);
     return [{ id: 1, x: 0, y: 0, width: 1920, height: 1200 }];
+  },
+
+  // The startup report reads these at every start. Fixed values, shaped as the
+  // documented API returns them, so the log a test leaves behind reads as a
+  // real one does.
+  async getOSInfo() {
+    return { name: "Harness", description: "Playwright WebKit", version: "0" };
+  },
+  async getKernelInfo() {
+    return { variant: "harness", version: "0" };
+  },
+  async getCPUInfo() {
+    return { model: "stub", architecture: "x64", logicalThreads: 1 };
+  },
+  async getMemoryInfo() {
+    return { physical: { total: 8 * 1024 ** 3, available: 4 * 1024 ** 3 } };
+  },
+  async getDisks() {
+    return [{ mountPoint: "/", free: 100 * 1024 ** 3, total: 500 * 1024 ** 3 }];
   },
 };
 

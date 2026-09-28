@@ -16,14 +16,17 @@ import argparse
 import faulthandler
 import json
 import os
+import shutil
 import signal
 import sys
 import threading
+import time
 
 # The sidecar is run by path (python sidecar/main.py), so its own directory is
 # already on sys.path for these imports.
 import appinfo
 from channel import KIND_CONSOLE, KIND_MODEL, Channel, flush_logs, log
+from shellpath import adopt_path
 from completer import Completer
 from debugger import DebugSession, debug_python
 from formatter import format_source
@@ -85,6 +88,7 @@ FORMAT = "format"
 # works and up to thirty when it does not. Neither belongs in front of a
 # keystroke, and neither belongs behind a fifteen-second inspection.
 DEBUG = "debug"
+
 
 # The most suggestions one reply carries. `import ` alone offers 394 on this
 # machine, and every one of them crosses the socket on a keystroke. Two hundred
@@ -180,6 +184,9 @@ class Sidecar:
         # The kernel warm-up is held back until the console is up; see
         # warm_kernel.
         self._warmed = threading.Event()
+        # The warm-up's request id, held until its idle: that idle is the first
+        # moment the kernel can answer what its viewer defaults are.
+        self._warm_request = None
         # Set while an idle-triggered refresh is queued or running, so repeats
         # collapse into one. See request_refresh.
         self._refresh_queued = threading.Event()
@@ -380,6 +387,8 @@ class Sidecar:
         # where a step cannot queue behind the session that is starting.
         self.channel.on("run.start", self.on_run_start, lane=DEBUG)
         self.channel.on("run.tests", self.on_run_tests, lane=DEBUG)
+        self.channel.on("run.make", self.on_run_make, lane=DEBUG)
+        self.channel.on("run.tool", self.on_run_tool)
         self.channel.on("run.stop", self.on_run_stop, lane=DEBUG)
         self.channel.on("debug.start", self.on_debug_start, lane=DEBUG)
         self.channel.on("debug.stop", self.on_debug_stop, lane=DEBUG)
@@ -558,21 +567,37 @@ class Sidecar:
             # first Run onto every startup. See on_iopub for what fires it now.
             self.channel.send_binary(KIND_CONSOLE, data)
 
+        started = time.monotonic()
+
         def on_exit():
             # A restart stops the console on purpose and starts a new one a
             # moment later. Reporting that as an exit would put "[console
             # exited]" in the transcript every time the user restarts.
             if self.console is not console:
                 return
-            self.channel.send("console.exit")
+            # A console that ended on its own - Ctrl-D at its prompt, `exit`,
+            # a crash - is only the client; the kernel and everything in it
+            # are fine. So it is replaced, and the namespace is not touched:
+            # Restart Kernel was the only way back and it threw the session's
+            # names away for a client that had merely quit. Only one that was
+            # typed into: a console that cannot start, or draws its banner and
+            # crashes, does so without a keystroke and would be replaced for
+            # ever, while one that got a keystroke ended because of it. A
+            # lifetime was the first test and a burst limit the second; timing
+            # cannot tell a person from a loop, and input can. Not while we
+            # are leaving. The replacement is started on the control lane,
+            # where a kernel restart runs too, so the two cannot start a
+            # console each.
+            lived = time.monotonic() - started
+            respawn = console.typed.is_set() and not self._refusing("a console")
+            self.channel.send("console.exit", respawning=respawn)
+            if respawn:
+                log(f"Console exited after {lived:.0f}s; starting another")
+                self.channel.submit(CONTROL, lambda: self._console_respawn(console))
+            else:
+                log(f"Console exited after {lived:.0f}s; not replaced - nobody had typed into it")
 
-        console = PtyConsole(
-            python=sys.executable,
-            console_module_dir=self.sidecar_dir,
-            connection_file=self.kernel.connection_file,
-            on_output=on_output,
-            on_exit=on_exit,
-        )
+        console = self._new_console(on_output, on_exit)
         self.console = console
         if self.console_size is None:
             console.start()
@@ -619,7 +644,8 @@ class Sidecar:
         try:
             # Watched, because this is the line that went unanswered for two
             # minutes on 2026-08-15 and the log said nothing more about it.
-            self.watch_stall(self.kernel.warm_up(), "Kernel warm-up")
+            self._warm_request = self.kernel.warm_up()
+            self.watch_stall(self._warm_request, "Kernel warm-up")
         except Exception as exc:  # noqa: BLE001 - a failed warm-up only costs speed
             log(f"Kernel warm-up failed: {exc}")
 
@@ -644,6 +670,12 @@ class Sidecar:
         # after that return would never be cancelled at all.
         if msg_type == "status" and content.get("execution_state") == "idle":
             self.finish_stall(message["parent_header"].get("msg_id"))
+            # The first refresh. Every later one is booked by an execute idle,
+            # and the warm-up is internal - so without this the defaults control
+            # would show nothing until the first run.
+            if self._warm_request is not None and message["parent_header"].get("msg_id") == self._warm_request:
+                self._warm_request = None
+                self.request_refresh()
 
         # Warm-up and inspection requests produce status traffic of their own.
         # Treating that as user activity would make the explorer refresh in
@@ -705,6 +737,18 @@ class Sidecar:
             # cannot differ.
             # Which run this is about. A busy names the one the kernel has
             # just started - ours or the console's - and an idle retires it.
+            #
+            # An idle with another of our runs still waiting is not idle. The
+            # kernel serves its shell socket in order and the next run is
+            # already on it, so it is what runs next - and its own busy can be
+            # a long time coming: the message leaves the kernel on the IOPub
+            # thread, which needs the GIL, and an importer that holds the GIL
+            # for eight seconds holds that message for eight seconds too.
+            # Measured on a large STEP: the idle of the one-line request before
+            # it arrived at once, the import's busy arrived with its model, and
+            # the toolbar read idle for the whole import. So the next pending
+            # run is taken as running from the previous one's idle, and the
+            # kernel's late busy then names the same run.
             parent_id = message["parent_header"].get("msg_id")
             with self._runs_lock:
                 if state == "busy":
@@ -714,6 +758,9 @@ class Sidecar:
                         self._pending_runs.remove(parent_id)
                     if parent_id == self._running_run:
                         self._running_run = None
+                    if len(self._pending_runs) > 0:
+                        self._running_run = self._pending_runs[0]
+                        state = "busy"
 
             if state == "busy":
                 self._kernel_busy.set()
@@ -730,6 +777,10 @@ class Sidecar:
             # here. Kept as a condition rather than assumed, because it says
             # what the refresh depends on rather than leaving a reader to notice
             # that something twenty lines earlier happens to guarantee it.
+            # `state` is what was reported, so an idle rewritten to busy above
+            # - another run of ours is next - books no refresh: it would only
+            # queue behind that run, and describe a namespace the run is still
+            # changing. The run's own idle books it.
             if state == "idle" and parent_type == "execute_request":
                 # Namespace may have changed - whoever executed it, editor or
                 # console. Pushed rather than polled, so an idle session costs
@@ -780,6 +831,19 @@ class Sidecar:
         webview would roughly double the traffic for data it cannot read.
         """
         self.measurements.load(mapping_bytes)
+
+    def _accept_run(self, msg_id):
+        """Record a run the kernel has been handed.
+
+        With nothing of ours running it is the running one, not a waiting one:
+        the kernel takes it next, and its own busy may be a while - see the
+        idle handling in on_iopub for why. Counted as waiting, the toolbar read
+        "busy [+1]" for a STEP import that had already started.
+        """
+        with self._runs_lock:
+            self._pending_runs.append(msg_id)
+            if self._running_run is None:
+                self._running_run = msg_id
 
     def queued_runs(self):
         """How many of our runs are waiting for the kernel to reach them."""
@@ -1010,6 +1074,28 @@ class Sidecar:
         rows = self._inspect(f"{INSPECTOR}.variables()", timeout=timeout)
         if rows is not None:
             self.channel.send("vars.data", variables=rows)
+        # The parameter panel's models, read beside the namespace for the same
+        # reason the defaults are: a @ui function appears, changes or goes with
+        # the Run that defined it, and the panel has to say what is there now.
+        models = self._inspect(f"{INSPECTOR}.ui_models()", timeout=timeout)
+        if models is not None:
+            self.channel.send("ui.models", models=models)
+        # The viewer defaults the toolbar shows a control for, read on the same
+        # occasions as the namespace: they move with it - a script's own
+        # set_defaults, a line typed in the console, a restart - and the only
+        # honest control is one that reads them rather than remembers them.
+        #
+        # Never while the warm-up is importing. The startup refresh runs during
+        # it - it always has, and its namespace read merely times out - but
+        # get_default reaches into build123d_studio while the main thread is
+        # still initialising that module, and a kernel wedged at 0% CPU with
+        # the warm-up never finishing is what that produced. The refresh the
+        # warm-up's own idle books is the first to carry the defaults.
+        if self._warm_request is not None:
+            return
+        defaults = self._inspect(f"{INSPECTOR}.viewer_defaults()", timeout=timeout)
+        if defaults is not None:
+            self.channel.send("viewer.defaults", **defaults)
 
     def request_refresh(self):
         """Queue an idle-triggered refresh, coalescing repeats.
@@ -1089,6 +1175,29 @@ class Sidecar:
     # between stopping the old one and starting its replacement, and a keystroke
     # or a pane resize can arrive in exactly that window.
 
+    def _new_console(self, on_output, on_exit):
+        """The console process. A method so a test can hand back a fake."""
+        return PtyConsole(
+            python=sys.executable,
+            console_module_dir=self.sidecar_dir,
+            connection_file=self.kernel.connection_file,
+            on_output=on_output,
+            on_exit=on_exit,
+        )
+
+    def _console_respawn(self, exited):
+        """Start a console in place of one that exited on its own.
+
+        On the control lane, behind whatever restart may be in flight: if a
+        restart got there first, `self.console` is no longer the one that
+        exited and there is nothing left to do.
+        """
+        if self.console is not exited or self._refusing("a console"):
+            return
+        self.console = None
+        self.console_start()
+        self.channel.send("console.restarted")
+
     def on_console_input(self, payload):
         if self.console is not None:
             self.console.write(payload)
@@ -1120,8 +1229,7 @@ class Sidecar:
         # would otherwise still ask a kernel that has a Run waiting in line.
         self._kernel_busy.set()
         # Recorded before the frame, so the count on it includes this run.
-        with self._runs_lock:
-            self._pending_runs.append(msg_id)
+        self._accept_run(msg_id)
         self.send_kernel_status("busy")
         log(f"Execute: {len(code)} chars, msg_id {msg_id}")
 
@@ -1133,6 +1241,7 @@ class Sidecar:
         self.watch_stall(msg_id, "Execute")
 
     def on_interrupt(self, _message):
+        log("Interrupt: sending SIGINT to the kernel")
         self.kernel.interrupt()
 
     # --- code completion ---
@@ -1333,6 +1442,34 @@ class Sidecar:
         else:
             log(f"Tests failed to start: {error}")
             self.channel.send("run.failed", path=path, message=error)
+
+    def on_run_tool(self, message):
+        """Whether a command is on the PATH a run would get.
+
+        Answered here and not by the frontend spawning `make --version`,
+        because the PATH that matters is this process's - the one with the
+        environment's bin and the login shell's entries on it - and the
+        frontend's own is the launcher's.
+        """
+        name = message.get("name")
+        present = isinstance(name, str) and name != "" and shutil.which(name) is not None
+        self.channel.send("run.tool", id=message.get("id"), name=name, present=present)
+
+    def on_run_make(self, message):
+        """Run one Makefile target, the way a pytest run is run."""
+        if self._refusing("a run"):
+            return
+        makefile = message.get("makefile")
+        target = message.get("target")
+        if not isinstance(makefile, str) or not isinstance(target, str) or target == "":
+            self.channel.send("run.failed", path=makefile, message="no target given")
+            return
+        error = self.run.start_make(makefile, target, env=self.kernel.kernel_environment())
+        if error is None:
+            self.channel.send("run.started", path=makefile)
+        else:
+            log(f"make {target} failed to start: {error}")
+            self.channel.send("run.failed", path=makefile, message=error)
 
     def on_run_stop(self, _message):
         self.run.stop()
@@ -1804,6 +1941,10 @@ def main():
     # deletes it, and from then on os.getcwd() raises FileNotFoundError -
     # which is what turned an "upgrade packages" into an unrestartable kernel.
     os.chdir(os.path.expanduser("~"))
+
+    # Before anything is spawned: every child inherits this process's PATH,
+    # and from the Finder that is four system directories - see shellpath.py.
+    adopt_path(log)
 
     # A wedged startup is silent by construction, and that silence is what made
     # the Windows deadlock expensive: the sidecar simply stopped, having logged

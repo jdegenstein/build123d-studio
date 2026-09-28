@@ -83,6 +83,11 @@ class FakeSidecar {
     if (!this._answers.has("editor.format")) {
       this._answers.set("editor.format", () => ({ source: null }));
     }
+    // A machine with make, unless a test says otherwise: the sidecar answers
+    // from its own PATH, and the row menu waits on it.
+    if (!this._answers.has("run.tool")) {
+      this._answers.set("run.tool", (frame) => ({ name: frame.name, present: true }));
+    }
     if (!this._answers.has("editor.restartLanguageServer")) {
       this._answers.set("editor.restartLanguageServer", () => ({ detail: "restarted" }));
     }
@@ -277,6 +282,9 @@ export async function open(page, options = {}) {
     brokenListing = false,
     // No trash on this volume, so a delete has to ask a second question.
     trashFails = false,
+    // Spawned processes a previous page of this window left behind, as
+    // {id, pid}: what the application must stop before starting its own.
+    leftovers = [],
     // Modification times for seeded files, where a test needs one to mean
     // something.
     times = {},
@@ -330,7 +338,7 @@ export async function open(page, options = {}) {
       globalThis.__HARNESS_PROCESSES__ = processes;
     },
     [{ sidecar: SIDECAR, env: {} }, files, settings, times,
-      { running, brokenListing, trashFails }],
+      { running, brokenListing, trashFails, leftovers }],
   );
 
   await page.goto("/");

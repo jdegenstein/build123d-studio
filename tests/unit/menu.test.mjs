@@ -110,12 +110,13 @@ test("File carries the items tabs will need, separated into groups", () => {
   );
 });
 
-test("View carries the two layout toggles", () => {
+test("View carries the layout toggles and the parameter panel", () => {
   const view = submenu(menu("Darwin"), "menu.view");
   assert.deepEqual(view.map((entry) => entry.text),
-                   ["Toggle Sidebar", "Toggle Console and Variables"]);
+                   ["Toggle Sidebar", "Toggle Console and Variables", "Toggle Parameters"]);
   assert.equal(view[0].id, MENU.TOGGLE_SIDEBAR);
   assert.equal(view[1].id, MENU.TOGGLE_BOTTOM);
+  assert.equal(view[2].id, MENU.TOGGLE_PARAMS);
 });
 
 test("Close Folder sits with the other closing commands", () => {

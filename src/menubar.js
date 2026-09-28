@@ -43,6 +43,10 @@ import * as log from "./log.js";
 // project - and the menu is rebuilt whenever either changes.
 const NEEDS_TABS = new Set([MENU.SAVE_ALL, MENU.CLOSE, MENU.CLOSE_ALL]);
 const NEEDS_FOLDER = new Set([MENU.CLOSE_FOLDER, MENU.TOGGLE_SIDEBAR]);
+// A panel for a model the kernel does not have would be an empty window.
+// Greyed like the stepping items, and for the same reason: the menu keeps one
+// shape and the entry says what a @ui function would buy.
+const NEEDS_MODEL = new Set([MENU.TOGGLE_PARAMS]);
 
 // Stepping means nothing without something stopped to step. Greyed rather than
 // hidden, so the Run menu keeps one shape and somebody can see what debugging
@@ -83,6 +87,7 @@ let clipboardIsNative = false;
 // from importing the editor.
 let hasFolder = () => false;
 let hasTabs = () => false;
+let hasModel = () => false;
 
 /**
  * Whether the platform's own clipboard roles are used.
@@ -158,9 +163,10 @@ function onMenuItemClicked(event) {
  * @param {object} commands handlers by menu id; the clipboard ones are ignored
  *   where the platform's own roles are used instead
  */
-export function watchSession({ folder, tabs }) {
+export function watchSession({ folder, tabs, model = () => false }) {
   hasFolder = folder;
   hasTabs = tabs;
+  hasModel = model;
 }
 
 export async function initMenu(commands) {
@@ -213,6 +219,9 @@ export async function refreshMenu() {
       }
       if (NEEDS_SESSION.has(id)) {
         return isDebugging();
+      }
+      if (NEEDS_MODEL.has(id)) {
+        return hasModel();
       }
       return true;
     },

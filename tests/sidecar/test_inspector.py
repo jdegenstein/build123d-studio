@@ -20,7 +20,7 @@ import sys
 import threading
 import unittest
 
-from build123d_studio import inspector
+from build123d_studio import Param, inspector, ui
 
 NESTED = dict(
     a=12,
@@ -299,6 +299,36 @@ class InspectorTest(NamespaceFixture, unittest.TestCase):
 
         self.assertIn("Awkward", self.variables()["awkward"]["repr"])
 
+    # --- the viewer defaults the toolbar shows ---
+
+    def test_the_reset_camera_default_travels_by_name(self):
+        """Read from the module already in the kernel, never imported: the
+        refresh runs on every idle. A Camera member goes as its name."""
+        import enum
+        import types
+
+        class Camera(enum.Enum):
+            RESET = "reset"
+            KEEP = "keep"
+
+        fake = types.ModuleType("build123d_studio")
+        fake.get_default = lambda key: {"reset_camera": Camera.KEEP}[key]
+        real = sys.modules.get("build123d_studio")
+        sys.modules["build123d_studio"] = fake
+        try:
+            self.assertEqual(json.loads(inspector.viewer_defaults()), {"reset_camera": "KEEP"})
+            fake.get_default = lambda key: (_ for _ in ()).throw(RuntimeError("no viewer"))
+            self.assertEqual(json.loads(inspector.viewer_defaults()), {"reset_camera": None})
+        finally:
+            sys.modules["build123d_studio"] = real
+
+    def test_without_the_module_the_default_is_null_rather_than_an_error(self):
+        real = sys.modules.pop("build123d_studio")
+        try:
+            self.assertEqual(json.loads(inspector.viewer_defaults()), {"reset_camera": None})
+        finally:
+            sys.modules["build123d_studio"] = real
+
     # --- what is data and what is code ---
 
     def test_classes_and_functions_are_not_variables(self):
@@ -315,6 +345,17 @@ class InspectorTest(NamespaceFixture, unittest.TestCase):
         self.assertIn("size", rows)
         self.assertNotIn("Cube", rows)
         self.assertNotIn("helper", rows)
+
+    def test_underscore_names_are_hidden_except_the_imported_one(self):
+        """`_imported` is what a click on a CAD file in the tree produces, and
+        the click is for looking at it. Every other underscore name stays out:
+        IPython's `_`, `__builtins__`, a script's own private helpers."""
+        exec("_scratch = 1\n_imported = 2\n", self.namespace)  # noqa: S102
+        rows = self.variables()
+
+        self.assertIn("_imported", rows)
+        self.assertNotIn("_scratch", rows)
+        self.assertNotIn("__builtins__", rows)
 
     def test_nor_is_a_lambda_or_an_instance_method(self):
         self.given(twice=lambda x: x * 2, method="".join)
@@ -454,6 +495,149 @@ class InspectorTest(NamespaceFixture, unittest.TestCase):
 
         self.assertEqual(attributes, {"topology": "6 faces, 12 edges, 8 vertices"})
 
+    def test_a_bounding_box_opens_to_its_extent(self):
+        """A BoundBox used to open to "no further detail" - the one thing it
+        is for. Its fields are plain attributes, read as they are."""
+
+        class Vector:
+            def __init__(self, *xyz):
+                self.xyz = xyz
+
+            def __repr__(self):
+                return f"Vector{self.xyz}"
+
+        class BoundBox:
+            min = Vector(-0.5, -1, -1.5)
+            max = Vector(0.5, 1, 1.5)
+            size = Vector(1, 2, 3)
+            diagonal = 3.7416573867739413
+
+            # A method on the real one, where the others are attributes - and
+            # a fake with it as an attribute passed while the pane showed
+            # "<bound method BoundBox.center of ...>".
+            def center(self):
+                return Vector(0, 0, 0)
+
+        self.given(bb=BoundBox())
+
+        self.assertEqual(
+            self.detail(["bb"])["attributes"],
+            {
+                "min": "Vector(-0.5, -1, -1.5)",
+                "max": "Vector(0.5, 1, 1.5)",
+                "size": "Vector(1, 2, 3)",
+                "center": "Vector(0, 0, 0)",
+                "diagonal": "3.7416573867739413",
+            },
+        )
+
+    def test_a_vertex_opens_to_its_coordinates(self):
+        """Every count of a vertex is implied, so it used to open to nothing."""
+
+        class Vertex:
+            X, Y, Z = 1.0, 2.0, 3.0
+
+        self.given(v=Vertex())
+
+        self.assertEqual(self.detail(["v"])["attributes"], {"X": "1.0", "Y": "2.0", "Z": "3.0"})
+
+    def test_a_pos_and_a_rot_open_as_the_locations_they_are(self):
+        """Pos and Rot subclass Location; a table keyed by the exact type
+        name missed both. The lookup walks the bases."""
+
+        class Location:
+            position = "Vector(1, 2, 3)"
+            orientation = "Vector(0, 0, 0)"
+
+        class Pos(Location):
+            pass
+
+        self.given(p=Pos())
+
+        self.assertEqual(
+            self.detail(["p"])["attributes"],
+            {"position": "'Vector(1, 2, 3)'", "orientation": "'Vector(0, 0, 0)'"},
+        )
+
+    def test_a_curve_opens_to_its_start_and_end(self):
+        """What `wire @ 0` and `wire @ 1` are in a script, without typing
+        them - and no "0 faces" in front of a curve's counts."""
+
+        # Not _FakeShape: its __init__ swaps in a fresh class and the two
+        # methods this test is about would go with it.
+        class Wire:
+            def faces(self):
+                return []
+
+            def edges(self):
+                return [None, None]
+
+            def vertices(self):
+                return [None, None, None]
+
+            def start_point(self):
+                return "Vector(0, 0, 0)"
+
+            def end_point(self):
+                return "Vector(2, 2, 0)"
+
+        self.given(w=Wire())
+
+        self.assertEqual(
+            self.detail(["w"])["attributes"],
+            {"start": "'Vector(0, 0, 0)'", "end": "'Vector(2, 2, 0)'", "topology": "2 edges, 3 vertices"},
+        )
+
+    def test_a_vector_and_a_location_open_to_their_components(self):
+        class Vector:
+            X, Y, Z, length = 1.0, 2.0, 3.0, 3.7416573867739413
+
+        class Location:
+            position = "Vector(1, 2, 3)"
+            orientation = "Vector(10, 20, 30)"
+
+        self.given(v=Vector(), loc=Location())
+
+        self.assertEqual(self.detail(["v"])["attributes"], {"X": "1.0", "Y": "2.0", "Z": "3.0", "length": "3.7416573867739413"})
+        self.assertEqual(
+            self.detail(["loc"])["attributes"],
+            {"position": "'Vector(1, 2, 3)'", "orientation": "'Vector(10, 20, 30)'"},
+        )
+
+    def test_an_edge_or_a_face_says_what_kind_of_geometry_it_is(self):
+        """LINE, CIRCLE, PLANE, CYLINDER - the first question about an edge
+        or a face, and not in its repr. OTHER, which is what every wire,
+        solid and compound answers, is no information and is left out; an
+        empty shape raises on the question and is left out the same way."""
+        import enum
+
+        class GeomType(enum.Enum):
+            CIRCLE = 1
+            OTHER = 2
+
+        # Plain fakes, not _FakeShape: its __init__ swaps in a fresh class
+        # and geom_type would go with it.
+        def counted(faces, edges, vertices):
+            return {
+                "faces": lambda self: [None] * faces,
+                "edges": lambda self: [None] * edges,
+                "vertices": lambda self: [None] * vertices,
+            }
+
+        Edge = type("Edge", (), {**counted(0, 1, 2), "geom_type": GeomType.CIRCLE})
+        Solid = type("Solid", (), {**counted(6, 12, 8), "geom_type": GeomType.OTHER})
+
+        def raising(self):
+            raise ValueError("empty")
+
+        Face = type("Face", (), {**counted(0, 0, 0), "geom_type": property(raising)})
+
+        self.given(e=Edge(), s=Solid(), n=Face())
+
+        self.assertEqual(self.detail(["e"])["attributes"], {"geometry": "circle"})
+        self.assertEqual(self.detail(["s"])["attributes"], {"topology": "6 faces, 12 edges, 8 vertices"})
+        self.assertEqual(self.detail(["n"])["attributes"], {"topology": "0 edges, 0 vertices"})
+
     def test_a_face_is_not_told_that_it_has_one_face(self):
         """Its own definition fixes that, so the count says nothing."""
         self.given(f=_FakeShape("Face", faces=1, edges=4, vertices=4))
@@ -585,6 +769,84 @@ class InspectorTest(NamespaceFixture, unittest.TestCase):
 
     def test_an_empty_path_is_answered_rather_than_raised(self):
         self.assertIn("error", self.detail([]))
+
+
+class UiModelsTest(NamespaceFixture, unittest.TestCase):
+    """The parameter pane's kernel half: which functions it lists and what a row says."""
+
+    def ui_models(self):
+        return json.loads(inspector.ui_models())
+
+    def test_a_decorated_function_is_listed_with_its_parameters_flattened(self):
+        @ui({"Holders": {"count": Param(desc="How many", interval=(3, 14))}, "wanted": Param()})
+        def stand(count: int = 7, wanted: bool = True):
+            return count
+
+        self.given(stand=stand)
+        models = self.ui_models()
+
+        self.assertEqual(list(models), ["stand"])
+        self.assertEqual(
+            models["stand"],
+            [
+                {
+                    "name": "count",
+                    "type": "int",
+                    "default": 7,
+                    "group": "Holders",
+                    "desc": "How many",
+                    "interval": [3, 14],
+                    "choice": None,
+                    "step": 1,
+                },
+                {
+                    "name": "wanted",
+                    "type": "bool",
+                    "default": True,
+                    "group": "",
+                    "desc": "",
+                    "interval": None,
+                    "choice": None,
+                    "step": 1,
+                },
+            ],
+        )
+
+    def test_only_functions_made_by_the_decorator_are_models(self):
+        """A `ui` attribute on anything else is somebody else's, and an undecorated function has none."""
+
+        class WithUi:
+            ui = {"a": (int, 1, "", Param())}
+
+        def plain(a: int = 1):
+            return a
+
+        self.given(klass=WithUi, instance=WithUi(), plain=plain, a_dict={"ui": 1})
+        self.assertEqual(self.ui_models(), {})
+
+    def test_a_missing_default_arrives_as_null(self):
+        @ui({"count": Param()})
+        def stand(count: int):
+            return count
+
+        self.given(stand=stand)
+        self.assertIsNone(self.ui_models()["stand"][0]["default"])
+
+    def test_a_default_the_pane_cannot_show_arrives_as_text(self):
+        """Rather than breaking the whole reply, which json.dumps would otherwise do."""
+
+        class Vector:
+            def __str__(self):
+                return "Vector(1, 2, 3)"
+
+        origin = Vector()
+
+        @ui({"origin": Param()})
+        def stand(origin: Vector = origin):
+            return origin
+
+        self.given(stand=stand)
+        self.assertEqual(self.ui_models()["stand"][0]["default"], "Vector(1, 2, 3)")
 
 
 class ConcurrentMutationTest(NamespaceFixture, unittest.TestCase):

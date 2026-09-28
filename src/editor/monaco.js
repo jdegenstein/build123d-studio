@@ -1,9 +1,34 @@
-// Import the editor core and just the Python grammar, not the "monaco-editor"
-// barrel. The barrel registers every bundled language, which drags in the
-// TypeScript, CSS, HTML and JSON language services and their web workers -
-// about 9 MB of assets for an editor that only ever shows Python.
+// Import the editor core and the grammars this editor shows, not the
+// "monaco-editor" barrel. The barrel registers every bundled language, which
+// drags in the TypeScript, CSS, HTML and JSON language services and their web
+// workers - about 9 MB of assets, nearly all of it TypeScript.
+//
+// Python, YAML and TOML are Monarch grammars: highlighting, folding and
+// brackets, no worker; YAML is 3.5 kB in the bundle, TOML (ours, toml.js)
+// about the same. JSON is a language service -
+// Monaco has no plain grammar for it - and costs about 850 kB minified
+// (jsonMode 409 kB, its worker 430 kB, measured in the production build),
+// loaded when the first JSON file is opened, not at startup. It adds syntax
+// diagnostics to the highlighting, which for settings.json and snippets.json
+// is what makes it worth that.
 import * as monaco from "monaco-editor/editor/editor.api.js";
 import "monaco-editor/languages/definitions/python/register.js";
+import "monaco-editor/languages/definitions/yaml/register.js";
+import { jsonDefaults } from "monaco-editor/language/json/monaco.contribution.js";
+import "./toml.js";
+
+// JSON here is JSONC. The file anyone edits by hand is snippets.json, which
+// is VS Code's .code-snippets shape and is read with jsonc-parser: comments
+// and trailing commas are part of it, and the shipped set has both on nearly
+// every line. The service reports each as an error by default, so it is told
+// what the application's own parser accepts. One setting for every .json -
+// the service has no per-file option - which means a comment in
+// settings.json passes too; that file is written by Settings, not by hand.
+jsonDefaults.setDiagnosticsOptions({
+  ...jsonDefaults.diagnosticsOptions,
+  comments: "ignore",
+  trailingCommas: "ignore",
+});
 // The context menu, and the Cut/Copy/Paste entries that fill it.
 //
 // editor.api.js is the API and nothing else: every *contribution* - the menu,
@@ -109,6 +134,7 @@ import "monaco-editor/editor/contrib/tokenization/browser/tokenization.js";
 // still show: as of 0.56 the exports map is {"./*": "./esm/vs/*.js"}, so the
 // esm/vs prefix is added for us and spelling it out resolves to esm/vs/esm/vs.
 import EditorWorker from "monaco-editor/editor/editor.worker.js?worker";
+import JsonWorker from "monaco-editor/language/json/json.worker.js?worker";
 
 import {
   cellAt,
@@ -135,22 +161,23 @@ import { COMMANDS } from "../keys.js";
 import { bindingsFor } from "../keybindings.js";
 import * as ipc from "../ipc.js";
 import * as log from "../log.js";
+import { runFromEditor } from "../params/panel.js";
 import { onThemeChange, resolvedTheme } from "../theme.js";
 
 // Monaco needs a worker to do anything non-trivial off the main thread. Python
-// has no dedicated language service in monaco-editor, so the generic editor
-// worker is the only one required - which is also why the bundle stays small.
+// and YAML have no language service in monaco-editor, so the generic editor
+// worker serves them; JSON asks for its own by label.
 self.MonacoEnvironment = {
-  getWorker() {
+  getWorker(_workerId, label) {
     // The worker is what computes word-based suggestions, so when it fails to
     // start the editor loses completion and says nothing about why. Monaco
     // reports that on the console, which this application does not have. Both
     // ends are logged: that one was asked for, and that it failed if it did.
-    const worker = new EditorWorker();
+    const worker = label === "json" ? new JsonWorker() : new EditorWorker();
     worker.addEventListener("error", (event) => {
-      log.error("Monaco editor worker failed:", event.message ?? String(event));
+      log.error(`Monaco ${label} worker failed:`, event.message ?? String(event));
     });
-    log.info("Monaco editor worker started");
+    log.info(`Monaco ${label} worker started`);
     return worker;
   },
 };
@@ -193,8 +220,14 @@ function currentModel() {
   return editor === null ? null : editor.getModel();
 }
 
-/** Send code to the kernel. It is echoed into the console pane as In [n]:. */
-function execute(code) {
+/**
+ * Send code to the kernel. It is echoed into the console pane as In [n]:.
+ *
+ * Exported for the one caller outside this file with a line of its own to run
+ * - a CAD file clicked in the tree, see importfile.js - so that it shows the
+ * console and returns the keyboard exactly as a Run does.
+ */
+export function execute(code) {
   if (code.trim() === "") {
     return;
   }
@@ -203,6 +236,9 @@ function execute(code) {
     return;
   }
   log.info(`Run: sending ${code.length} chars to the kernel`);
+  // A closed parameter panel comes back for the model this Run defines - a
+  // Run is the user asking for it again; an idle from anything else is not.
+  runFromEditor();
   // Whatever this prints lands in the console, so the console is what to look
   // at. Without this a run after a debug session would put its output behind
   // whichever tab happened to be showing, which is the same disappearing act
@@ -558,10 +594,47 @@ export function getValue() {
  * it, so Cmd-Z in a freshly opened file could put back a line belonging to a
  * file that was no longer on screen.
  */
-export function openBuffer({ path = null, text = "", caret = null, matchesDisk = true }) {
-  const key = buffers.open({ path, text, caret, matchesDisk });
+export function openBuffer({ path = null, text = "", caret = null, matchesDisk = true, image = null, preview = false }) {
+  const key = buffers.open({ path, text, caret, matchesDisk, image, preview });
   showBuffer(key);
   return key;
+}
+
+/** Whether a buffer is the preview tab - see buffers.js. */
+export function isPreviewBuffer(key) {
+  return buffers.isPreview(key);
+}
+
+/** The preview tab's key, or null. */
+export function previewBufferKey() {
+  return buffers.previewKey();
+}
+
+/** Keep a buffer: no single click replaces it afterwards. */
+export function pinBuffer(key) {
+  buffers.pin(key);
+}
+
+/**
+ * Put a picture over the editor, or take it away.
+ *
+ * The editor keeps its place in the layout and loses its model: an image tab
+ * is a tab with nothing to type into, and an editor with no model is already
+ * the state closing the last tab leaves, so everything that reads the active
+ * model knows it can be null.
+ */
+function showImage(url) {
+  const host = document.getElementById("image-host");
+  const picture = host.querySelector("img");
+  if (url === null) {
+    host.hidden = true;
+    picture.removeAttribute("src");
+    document.getElementById("editor-host").hidden = false;
+    return;
+  }
+  picture.src = url;
+  host.hidden = false;
+  document.getElementById("editor-host").hidden = true;
 }
 
 /**
@@ -581,6 +654,13 @@ export function showBuffer(key) {
 
   const buffer = buffers.get(key);
   buffers.activate(key);
+  if (buffer.image !== null) {
+    editor.setModel(null);
+    showImage(buffer.image);
+    notifyDirtyChanged();
+    return;
+  }
+  showImage(null);
   editor.setModel(buffer.model);
   refreshBreakpointDecorations();
   const state = buffers.viewState(key);
@@ -611,6 +691,7 @@ export function showNoBuffer() {
   }
   clearCellDecorations();
   buffers.deactivate();
+  showImage(null);
   editor.setModel(null);
   notifyDirtyChanged();
 }
@@ -621,7 +702,18 @@ export function closeBuffer(key) {
   // nothing left to read it from afterwards.
   forgetBuffer(key, bufferPath(key));
   breakpoints.forget(key);
+  // The bytes behind a picture are held by the page until the URL is revoked;
+  // closing the tab is the moment nobody will look at them again.
+  const image = buffers.imageOf(key);
+  if (image !== null) {
+    URL.revokeObjectURL(image);
+  }
   return buffers.close(key);
+}
+
+/** Whether a buffer is a picture rather than text. */
+export function isImageBuffer(key) {
+  return buffers.imageOf(key) !== null;
 }
 
 /** The keys of every open buffer, in the order they were opened. */
@@ -1052,6 +1144,13 @@ export function initEditor() {
   // Bound to the editor rather than to a model, so it follows whichever buffer
   // is on screen and survives every switch between them.
   editor.onDidChangeModelContent(() => {
+    // Typing into a preview keeps it. Before anything else, so that whatever
+    // redraws the strip on this keystroke already sees a pinned tab.
+    const active = buffers.activeKeyOf();
+    if (active !== null && buffers.isPreview(active)) {
+      buffers.pin(active);
+      notifyDirtyChanged();
+    }
     refreshCellDecorations();
     scheduleDirtyCheck();
     // Told on every keystroke rather than on a transition, because what
@@ -1571,6 +1670,11 @@ export async function formatBufferFor(key) {
     return null;
   }
   const model = buffer.model;
+  // ruff formats Python. A STEP export, a settings.json, a YAML file were
+  // all sent to it on save and declined; now they are not sent.
+  if (model.getLanguageId() !== "python") {
+    return null;
+  }
   const lineCount = model.getLineCount();
   if (tooLargeToFormat(lineCount)) {
     // Said once per save rather than silently, because "my file stopped being

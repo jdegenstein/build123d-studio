@@ -85,7 +85,7 @@ export async function toggleRunFile() {
   if (isDebugging()) {
     // Two processes both claiming the console and the explorer is exactly the
     // confusion the swap exists to prevent.
-    await notifyFailure("Run File", new Error("Stop the debug session first."));
+    await notifyFailure("Run File", "Stop the debug session first.");
     return;
   }
 
@@ -98,7 +98,7 @@ export async function toggleRunFile() {
   }
   const path = getCurrentFile();
   if (path === null) {
-    await notifyFailure("Run File", new Error("Save the file first; there is nothing to run."));
+    await notifyFailure("Run File", "Save the file first; there is nothing to run.");
     return;
   }
 
@@ -127,11 +127,11 @@ async function runPytestOn(what, choose) {
     // Deliberately not a toggle, unlike Run File. "Test File" that sometimes
     // means Stop, over a run that may not be a test run at all, is a menu item
     // nobody can predict - and Stop is in the tab row, where it says so.
-    await notifyFailure(what, new Error("Something is already running. Stop it first."));
+    await notifyFailure(what, "Something is already running. Wait for it to finish, or press Stop in the Run/Debug pane.");
     return;
   }
   if (isDebugging()) {
-    await notifyFailure(what, new Error("Stop the debug session first."));
+    await notifyFailure(what, "Stop the debug session first.");
     return;
   }
 
@@ -158,6 +158,32 @@ async function runPytestOn(what, choose) {
   announce(true);
   log.info("Testing", chosen);
   ipc.send("run.tests", { path: chosen, ignoreWarnings: ignoreWarnings() });
+}
+
+/**
+ * Run one target of a Makefile, from the Makefile's row in the tree.
+ *
+ * pytest's shape exactly - the same refusals, the same save of every buffer
+ * first, the same pane and the same Stop - with the target in place of a
+ * chooser: the menu already asked.
+ */
+export async function runMake(makefile, target) {
+  const what = `make ${target}`;
+  if (running) {
+    await notifyFailure(what, "Something is already running. Wait for it to finish, or press Stop in the Run/Debug pane.");
+    return;
+  }
+  if (isDebugging()) {
+    await notifyFailure(what, "Stop the debug session first.");
+    return;
+  }
+  if (!(await saveAll())) {
+    return;
+  }
+  clearDebugConsole();
+  announce(true);
+  log.info("Running", what, "in", makefile);
+  ipc.send("run.make", { makefile, target });
 }
 
 /** Run pytest over one file. */

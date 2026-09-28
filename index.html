@@ -115,6 +115,12 @@
               <span class="icon icon-refresh"></span>
             </button>
           </div>
+          <!-- A visual filter over what the tree already holds - `robot`, or
+               `.py` for an extension. Never a reason to read a folder. -->
+          <div class="tree-filter">
+            <input type="search" class="tree-filter-input" id="tree-filter" placeholder="Filter visible files"
+                   aria-label="Filter files" spellcheck="false">
+          </div>
           <!-- Why a name was refused, under the header and above the row it is
                about. Silence would look like Enter not working. -->
           <p class="tree-problem" id="tree-problem" hidden></p>
@@ -136,6 +142,7 @@
                  scripts/fetch-icons.mjs. Glyphs are referenced by codepoint from
                  icons.css rather than by the usual ligature text, because subsetting
                  to a handful of glyphs drops the ligature tables that make names work. -->
+            <div class="toolbar-row">
             <div class="toolbar">
               <button class="btn" id="btn-sidebar" title="Toggle the file tree">
                 <span class="icon icon-sidebar"></span>
@@ -209,6 +216,7 @@
                 <span class="icon icon-command"></span>
               </button>
             </div>
+            </div>
             <!-- The strip and the debug controls share one row: no second bar,
                  and no vertical space spent on a mode that is usually off. The
                  strip itself is untouched - it scrolls in whatever width is
@@ -217,6 +225,8 @@
               <div class="tab-strip" id="tab-strip" role="tablist" hidden></div>
             </div>
             <div class="editor-host" id="editor-host"></div>
+            <!-- A picture's tab: shown instead of the editor, never with it. -->
+            <div class="image-host" id="image-host" hidden><img alt="" draggable="false" /></div>
           </div>
           <div class="splitter splitter-v" id="splitter-v-top"></div>
           <div class="pane pane-viewer" id="pane-viewer"></div>
@@ -268,6 +278,15 @@
                 </button>
                 <button class="btn debug-btn" id="debug-stop" title="Stop">
                   <span class="icon icon-debug-stop"></span>
+                </button>
+              </div>
+              <!-- Shortcuts for the kernel's viewer defaults, right-aligned:
+                   the tabs are the left half of this row and these the right.
+                   Each one runs a line on the kernel and shows what the kernel
+                   then says the default is - see camerashortcut.js. -->
+              <div class="console-shortcuts" id="console-shortcuts">
+                <button class="btn shortcut-btn" id="camera-shortcut" title="Camera" hidden>
+                  <span class="icon icon-camera-reset"></span>
                 </button>
               </div>
             </div>

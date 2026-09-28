@@ -42,6 +42,81 @@ test.describe("clicking a file", () => {
     await expect(row(page, "part.py")).not.toHaveClass(/tree-active/);
   });
 
+  test("a click opens a CAD file like any other; Show in its menu imports it", async ({ page }) => {
+    // A STEP or an SVG is text, and sometimes the point is to edit it - so a
+    // click opens it in the editor, as a click does for everything. Showing
+    // is the row menu's, for the files build123d can import; the lines that
+    // run are echoed into the console, and _imported is the user's to keep.
+    // Proof, at writing: with the "show" item removed from showRowMenu, this
+    // fails on the menu having no Show.
+    const { sidecar } = await openApp(page, {
+      files: { ...FILES, [`${PROJECT}/frame.step`]: "ISO-10303-21;\n", [`${PROJECT}/logo.svg`]: "<svg/>\n" },
+    });
+
+    await row(page, "logo.svg").click();
+    await expect.poll(() => tabLabels(page)).toContain("logo.svg");
+    expect(sidecar.received.filter((frame) => frame.type === "kernel.execute")).toHaveLength(0);
+
+    await row(page, "frame.step").click({ button: "right" });
+    await page.locator(".context-menu-item", { hasText: "Show" }).click();
+
+    await sidecar.waitFor("kernel.execute");
+    await expect
+      .poll(() => sidecar.received.filter((frame) => frame.type === "kernel.execute").length)
+      .toBe(2);
+    const sent = sidecar.received.filter((frame) => frame.type === "kernel.execute").map((f) => f.code);
+    expect(sent).toEqual([
+      "# Importing frame.step ...",
+      "from build123d import import_step; from build123d_studio import show, Camera; " +
+        `_imported = import_step("${PROJECT}/frame.step"); show(_imported, reset_camera=Camera.RESET)`,
+    ]);
+    expect(await tabLabels(page)).not.toContain("frame.step");
+
+    // A Python file's menu has no Show.
+    await row(page, "part.py").click({ button: "right" });
+    await expect(page.locator(".context-menu")).toBeVisible();
+    await expect(page.locator(".context-menu-item", { hasText: "Show" })).toHaveCount(0);
+  });
+
+  test("the filter box narrows the tree to what has been opened: a name, or an extension", async ({ page }) => {
+    // Proof, at writing: with filteredEntries replaced by the plain listing
+    // in rowsUnder, this fails on the count after typing.
+    await openApp(page, {
+      files: { ...FILES, [`${PROJECT}/exports/bus.stl`]: "solid bus\n" },
+    });
+    const names = () => page.locator(".tree-row").allTextContents();
+    await expect.poll(() => names()).toEqual(expect.arrayContaining(["exports", "hinge.py", "part.py"]));
+
+    const box = page.locator("#tree-filter");
+    await box.fill("HINGE");
+    // hinge.py, and the folder that has never been read - nothing is known
+    // about what it holds, so it stays.
+    await expect(page.locator(".tree-row")).toHaveCount(2);
+    expect(await names()).toEqual(expect.arrayContaining(["exports", "hinge.py"]));
+    await expect(page.locator(".tree-row", { hasText: "part.py" })).toHaveCount(0);
+
+    // An extension: both scripts, and the unread folder.
+    await box.fill(".py");
+    await expect(page.locator(".tree-row")).toHaveCount(3);
+
+    // Open the folder under the filter: only what matches shows in it, and
+    // with nothing matching the folder itself goes.
+    await row(page, "exports").click();
+    await expect(page.locator(".tree-row", { hasText: "bus.stl" })).toHaveCount(0);
+    await expect(page.locator(".tree-row", { hasText: "exports" })).toHaveCount(0);
+
+    await box.fill(".stl");
+    await expect(page.locator(".tree-row")).toHaveCount(2);
+    expect(await names()).toEqual(expect.arrayContaining(["exports", "bus.stl"]));
+
+    await box.fill("zzz");
+    await expect(page.locator(".tree-empty")).toContainText('No file matches "zzz"');
+
+    await box.press("Escape");
+    await expect(box).toHaveValue("");
+    await expect(page.locator(".tree-row")).toHaveCount(4);
+  });
+
   test("but a right click opens nothing", async ({ page }) => {
     // The difference that makes the menu usable on a file somebody has no
     // intention of opening.
@@ -404,5 +479,308 @@ test.describe("opening a file gives it the keyboard", () => {
     await page.keyboard.type("MINE");
 
     await expect(page.locator(".monaco-editor .view-lines")).toContainText("MINE");
+  });
+});
+
+test.describe("a Makefile's row", () => {
+  const MAKEFILE = [
+    ".PHONY: build test",
+    "VERSION := 1",
+    "build:",
+    "\techo building",
+    "test: build",
+    "\tpytest",
+    "",
+  ].join("\n");
+  const withMakefile = { files: { ...FILES, [`${PROJECT}/Makefile`]: MAKEFILE } };
+  const entries = (page) => page.locator(".context-menu-item", { hasText: "Make ▸" });
+
+  test("offers each target below a line, and picking one runs it", async ({ page }) => {
+    // Flat rather than a submenu, by request: a right-click on a Makefile is
+    // asking for exactly this list. The harness sidecar answers run.tool with
+    // present, which is what a machine with make does.
+    const { sidecar } = await openApp(page, withMakefile);
+
+    await row(page, "Makefile").click({ button: "right" });
+
+    await expect(page.locator(".context-menu")).toBeVisible();
+    await expect(entries(page)).toHaveText(["Make ▸ build", "Make ▸ test"]);
+    await expect(page.locator(".context-menu .context-menu-separator")).toHaveCount(1);
+    // The file actions stay, above the line.
+    await expect(page.locator(".context-menu-item", { hasText: "Rename" })).toHaveCount(1);
+
+    await page.locator(".context-menu-item", { hasText: "Make ▸ test" }).click();
+
+    const frame = await sidecar.waitFor("run.make");
+    expect(frame.makefile).toBe(`${PROJECT}/Makefile`);
+    expect(frame.target).toBe("test");
+  });
+
+  test("while a target runs, Stop is on screen and ends it", async ({ page }) => {
+    // The answer to "how do I stop this": the Run/Debug bar comes up with Stop
+    // as its one control, for a make run as for a file. Pressing it sends
+    // run.stop, and the bar goes with it.
+    const { sidecar } = await openApp(page, withMakefile);
+
+    await row(page, "Makefile").click({ button: "right" });
+    await page.locator(".context-menu-item", { hasText: "Make ▸ test" }).click();
+    await sidecar.waitFor("run.make");
+
+    const stop = page.locator("#debug-stop");
+    await expect(page.locator("#pane-debug")).toBeVisible();
+    await expect(stop).toBeVisible();
+    await expect(stop).toBeEnabled();
+    for (const id of ["debug-continue", "debug-step-over", "debug-step-into", "debug-step-out"]) {
+      await expect(page.locator(`#${id}`)).toBeHidden();
+    }
+
+    await stop.click();
+
+    await sidecar.waitFor("run.stop");
+    await expect(page.locator("#debug-bar")).toBeHidden();
+  });
+
+  test("the Makefile is read at every right-click, so an edit shows at the next one", async ({ page }) => {
+    // Nothing about the file is remembered - only that make is here. A target
+    // added in a terminal is in the menu the next time it opens.
+    await openApp(page, withMakefile);
+
+    await row(page, "Makefile").click({ button: "right" });
+    await expect(entries(page)).toHaveText(["Make ▸ build", "Make ▸ test"]);
+    await page.keyboard.press("Escape");
+
+    await page.evaluate(
+      ([path, text]) => globalThis.__NEUTRALINO_STUB__.given(path, text),
+      [`${PROJECT}/Makefile`, `${MAKEFILE}release: test\n\tsh release.sh\n`],
+    );
+    await row(page, "Makefile").click({ button: "right" });
+
+    await expect(entries(page)).toHaveText(["Make ▸ build", "Make ▸ test", "Make ▸ release"]);
+  });
+
+  test("other files get no Make entries", async ({ page }) => {
+    await openApp(page, withMakefile);
+
+    await row(page, "part.py").click({ button: "right" });
+
+    await expect(page.locator(".context-menu")).toBeVisible();
+    await expect(entries(page)).toHaveCount(0);
+    await expect(page.locator(".context-menu .context-menu-separator")).toHaveCount(0);
+  });
+
+  test("without make on this machine the row is a file like any other - until make answers", async ({ page }) => {
+    // The sidecar says whether make is on the PATH a run gets. And absence is
+    // not remembered: the next right-click asks again, which is what stops
+    // one bad moment deciding the session - see tools.js, and the git case
+    // it was written for.
+    const { sidecar } = await openApp(page, withMakefile);
+
+    let installed = false;
+    sidecar.answer("run.tool", (frame) => ({ name: frame.name, present: installed }));
+    await row(page, "Makefile").click({ button: "right" });
+    await expect(page.locator(".context-menu")).toBeVisible();
+    await expect(entries(page)).toHaveCount(0);
+    await page.keyboard.press("Escape");
+
+    installed = true;
+    await row(page, "Makefile").click({ button: "right" });
+    await expect(entries(page)).toHaveText(["Make ▸ build", "Make ▸ test"]);
+    expect(sidecar.received.filter((f) => f.type === "run.tool")).toHaveLength(2);
+  });
+});
+
+test.describe("a picture in the tree", () => {
+  // A 2x3 PNG, red over green: the bytes of a real file rather than a name,
+  // so that the picture *drawing* is what the test holds - a blob URL that
+  // points at nothing gives an <img> with no size.
+  const PNG = [137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 2, 0, 0, 0, 3, 8, 2,
+    0, 0, 0, 54, 136, 73, 214, 0, 0, 0, 16, 73, 68, 65, 84, 120, 156, 99, 248, 207, 192, 0, 68, 12, 40, 20,
+    0, 68, 208, 5, 251, 164, 207, 222, 128, 0, 0, 0, 0, 73, 69, 78, 68, 174, 66, 96, 130];
+  const SHOT = `${PROJECT}/shot.png`;
+
+  async function openWithPicture(page) {
+    // Listed at open with a placeholder, then replaced by the bytes: the
+    // harness seeds strings, and the tree only needs the name to list it.
+    const handles = await openApp(page, { files: { ...FILES, [SHOT]: "placeholder" } });
+    await page.evaluate(
+      ([path, bytes]) => globalThis.__NEUTRALINO_STUB__.given(path, new Uint8Array(bytes).buffer),
+      [SHOT, PNG],
+    );
+    return handles;
+  }
+
+  test("opens in a tab that shows it, with no editor behind", async ({ page }) => {
+    await openWithPicture(page);
+
+    await row(page, "shot.png").click();
+
+    await expect.poll(() => tabLabels(page)).toContain("shot.png");
+    const picture = page.locator("#image-host img");
+    await expect(page.locator("#image-host")).toBeVisible();
+    await expect(picture).toHaveAttribute("src", /^blob:/);
+    // Decoded, which is the claim: the bytes reached the page as a PNG.
+    await expect.poll(() => picture.evaluate((img) => img.naturalWidth)).toBe(2);
+    await expect(page.locator("#editor-host")).toBeHidden();
+  });
+
+  test("switching back to a text tab brings the editor back", async ({ page }) => {
+    await openWithPicture(page);
+    // Kept, or the single click on the picture would replace it - see the
+    // preview tabs below.
+    await row(page, "part.py").dblclick();
+    await expect.poll(() => tabLabels(page)).toContain("part.py");
+
+    await row(page, "shot.png").click();
+    await expect(page.locator("#image-host")).toBeVisible();
+
+    await page.locator(".tab", { hasText: "part.py" }).click();
+
+    await expect(page.locator("#image-host")).toBeHidden();
+    await expect(page.locator("#editor-host")).toBeVisible();
+    await expect(page.locator(".monaco-editor .view-lines")).toContainText("PART = 1");
+  });
+
+  test("Save writes nothing over it, and it is never dirty", async ({ page }) => {
+    // The one thing this tab must never do. Its model is empty, and a save
+    // that wrote it would replace the picture with nothing.
+    await openWithPicture(page);
+    await row(page, "shot.png").click();
+    await expect(page.locator("#image-host")).toBeVisible();
+
+    await page.keyboard.press("Meta+s");
+    await page.waitForTimeout(300);
+
+    const stored = await page.evaluate(
+      (path) => globalThis.__NEUTRALINO_STUB__.wrote(path),
+      SHOT,
+    );
+    expect(typeof stored, "the picture was written as text").not.toBe("string");
+    await expect(page.locator(".tab-close.tab-dirty")).toHaveCount(0);
+  });
+
+  test("closing the tab frees it, and it opens again", async ({ page }) => {
+    await openWithPicture(page);
+    await row(page, "shot.png").click();
+    await expect(page.locator("#image-host")).toBeVisible();
+
+    await page.locator(".tab", { hasText: "shot.png" }).locator(".tab-close").click();
+
+    await expect(page.locator("#image-host")).toBeHidden();
+    await row(page, "shot.png").click();
+    await expect(page.locator("#image-host")).toBeVisible();
+    await expect.poll(() => page.locator("#image-host img").evaluate((img) => img.naturalWidth)).toBe(2);
+  });
+});
+
+test.describe("preview tabs", () => {
+  // VS Code's rule, adopted after clicking through a folder of pictures left
+  // a strip full of them: a single click opens the tab the next single click
+  // replaces, and a double-click, an edit or a double-click on the tab keeps it.
+  const THREE = {
+    files: { ...FILES, [`${PROJECT}/third.py`]: "THIRD = 1\n" },
+  };
+  const previewTabs = (page) => page.locator(".tab.tab-preview .tab-label").allTextContents();
+  // The strip minus the Untitled buffer a start with no tabs opens; these
+  // tests are about the files clicked in the tree.
+  const fileTabs = async (page) => (await tabLabels(page)).filter((label) => label !== "Untitled");
+
+  test("a single click previews, and the next single click replaces it", async ({ page }) => {
+    await openApp(page, THREE);
+
+    await row(page, "part.py").click();
+    await expect.poll(() => fileTabs(page)).toEqual(["part.py"]);
+    await expect.poll(() => previewTabs(page)).toEqual(["part.py"]);
+
+    await row(page, "hinge.py").click();
+
+    await expect.poll(() => fileTabs(page)).toEqual(["hinge.py"]);
+    await expect.poll(() => previewTabs(page)).toEqual(["hinge.py"]);
+    await expect(page.locator(".monaco-editor .view-lines")).toContainText("HINGE = 1");
+  });
+
+  test("a double-click keeps the tab, so the next single click adds one", async ({ page }) => {
+    await openApp(page, THREE);
+
+    await row(page, "part.py").dblclick();
+    await expect.poll(() => fileTabs(page)).toEqual(["part.py"]);
+    await expect.poll(() => previewTabs(page)).toEqual([]);
+
+    await row(page, "hinge.py").click();
+
+    await expect.poll(() => fileTabs(page)).toEqual(["part.py", "hinge.py"]);
+    await expect.poll(() => previewTabs(page)).toEqual(["hinge.py"]);
+  });
+
+  test("typing into a preview keeps it", async ({ page }) => {
+    await openApp(page, THREE);
+    await row(page, "part.py").click();
+    await expect.poll(() => previewTabs(page)).toEqual(["part.py"]);
+
+    await page.keyboard.type("X");
+    await expect.poll(() => previewTabs(page)).toEqual([]);
+
+    await row(page, "hinge.py").click();
+    await expect.poll(() => fileTabs(page)).toEqual(["part.py", "hinge.py"]);
+  });
+
+  test("double-clicking the tab keeps it, and a single click on a kept file does not demote it", async ({ page }) => {
+    await openApp(page, THREE);
+    await row(page, "part.py").click();
+    await expect.poll(() => previewTabs(page)).toEqual(["part.py"]);
+
+    await page.locator(".tab", { hasText: "part.py" }).dblclick();
+    await expect.poll(() => previewTabs(page)).toEqual([]);
+
+    // Kept stays kept when clicked once in the tree.
+    await row(page, "part.py").click();
+    await expect.poll(() => previewTabs(page)).toEqual([]);
+    await row(page, "hinge.py").click();
+    await expect.poll(() => fileTabs(page)).toEqual(["part.py", "hinge.py"]);
+  });
+
+  test("the preview survives a restart as a preview", async ({ page }) => {
+    // The workspace remembers which tab was the preview, so a session that
+    // ends with one comes back with one - and the first single click after
+    // the restart replaces it rather than adding to it.
+    await openApp(page, {
+      ...THREE,
+      settings: {
+        workspace: {
+          folder: PROJECT,
+          tabs: [
+            { path: `${PROJECT}/part.py`, caret: null, preview: false },
+            { path: `${PROJECT}/hinge.py`, caret: null, preview: true },
+          ],
+          active: `${PROJECT}/hinge.py`,
+        },
+      },
+    });
+    await expect.poll(() => fileTabs(page)).toEqual(["part.py", "hinge.py"]);
+    await expect.poll(() => previewTabs(page)).toEqual(["hinge.py"]);
+
+    await row(page, "third.py").click();
+
+    await expect.poll(() => fileTabs(page)).toEqual(["part.py", "third.py"]);
+  });
+
+  test("a picture left open comes back as a picture, not as its bytes", async ({ page }) => {
+    // Restore read every remembered tab as text. A PNG read that way is a
+    // buffer of its bytes with an editor behind it - and a Save that writes
+    // them back as such.
+    const PNG = [137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 2, 0, 0, 0, 3, 8, 2,
+      0, 0, 0, 54, 136, 73, 214, 0, 0, 0, 16, 73, 68, 65, 84, 120, 156, 99, 248, 207, 192, 0, 68, 12, 40, 20,
+      0, 68, 208, 5, 251, 164, 207, 222, 128, 0, 0, 0, 0, 73, 69, 78, 68, 174, 66, 96, 130];
+    const SHOT = `${PROJECT}/shot.png`;
+    // The bytes themselves, seeded before the page loads: restore reads them.
+    await openApp(page, {
+      files: { ...FILES, [SHOT]: PNG },
+      settings: {
+        workspace: { folder: PROJECT, tabs: [{ path: SHOT, caret: null, preview: false }], active: SHOT },
+      },
+    });
+
+    await expect.poll(() => fileTabs(page)).toEqual(["shot.png"]);
+    await expect(page.locator("#image-host")).toBeVisible();
+    await expect(page.locator("#editor-host")).toBeHidden();
   });
 });

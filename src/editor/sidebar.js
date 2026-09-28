@@ -21,6 +21,7 @@ import {
   freeName,
   isInside,
   joinPath,
+  filteredEntries,
   nameProblem,
   parentOf,
   separatorOf,
@@ -29,6 +30,9 @@ import {
 } from "./tree.js";
 import { askTwoWay, notifyFailure, notifyRefusal } from "../confirm.js";
 import { showContextMenu } from "../contextmenu.js";
+import { importerFor } from "./importfile.js";
+import { isMakefile, makeTargets } from "./makefile.js";
+import { hasMake } from "../tools.js";
 import { getSetting, setSetting } from "../store.js";
 import { refreshLayout } from "../layout/splitter.js";
 import * as log from "../log.js";
@@ -41,6 +45,9 @@ const HIDDEN_KEY = "sidebarHidden";
 
 let root = null;
 let openFile = null;
+let showFile = null;
+// What a Make entry in a Makefile's row menu runs; see showRowMenu.
+let runMake = () => {};
 // Told when a file is renamed here, so a tab holding it can follow.
 let renamedOnDisk = () => {};
 // Told after every refresh, so the editor can check whether the files its tabs
@@ -69,11 +76,25 @@ let marked = null;
 const expanded = new Set();
 const children = new Map();
 
-export function initSidebar({ onOpenFile, onRefreshed = () => {}, onRenamed = () => {} }) {
+// What is typed into the filter box. A visual filter over the entries the
+// tree holds - see filteredEntries in tree.js - and session state, not a
+// setting.
+let filter = "";
+
+export function initSidebar({
+  onOpenFile,
+  onShowFile = () => {},
+  onMake = () => {},
+  onRefreshed = () => {},
+  onRenamed = () => {},
+}) {
   openFile = onOpenFile;
+  showFile = onShowFile;
+  runMake = onMake;
   refreshed = onRefreshed;
   renamedOnDisk = onRenamed;
   hidden = getSetting(HIDDEN_KEY) === true;
+  initFilter();
   document.getElementById("tree-refresh").addEventListener("click", () => {
     refreshSidebar().catch((error) => log.warn("Could not refresh the tree:", error));
   });
@@ -351,7 +372,7 @@ function rowsUnder(path, depth, out) {
   if (pending !== null && pending.folder === path && pending.replacing === null) {
     out.push({ pending: true, depth });
   }
-  for (const entry of children.get(path) ?? []) {
+  for (const entry of filteredEntries(path, (folder) => children.get(folder), joinPath, filter)) {
     const full = joinPath(path, entry.name);
     // A rename is edited where the file already is, rather than as a new row
     // above it: the thing being renamed must stay where the eye left it.
@@ -400,9 +421,37 @@ function render() {
   document.getElementById("tree-root").textContent = baseName(root);
   document.getElementById("tree-root").title = root;
   describeCreateTargets();
-  body.replaceChildren(...rowsUnder(root, 0, []).map(
+  const rows = rowsUnder(root, 0, []);
+  if (rows.length === 0 && filter.trim() !== "") {
+    // Said with its scope: the filter looks at what has been opened, and "no
+    // file" on its own would read as the file not being there.
+    const empty = document.createElement("p");
+    empty.className = "tree-empty";
+    empty.textContent = `No file matches "${filter.trim()}" among the folders opened so far.`;
+    body.replaceChildren(empty);
+    return;
+  }
+  body.replaceChildren(...rows.map(
     (row) => (row.pending === true ? renderPendingRow(row.depth) : renderRow(row)),
   ));
+}
+
+/** The filter box: every keystroke re-renders; Escape clears and lets go. */
+function initFilter() {
+  const input = document.getElementById("tree-filter");
+  input.addEventListener("input", () => {
+    filter = input.value;
+    render();
+  });
+  input.addEventListener("keydown", (event) => {
+    if (event.key === "Escape") {
+      event.preventDefault();
+      input.value = "";
+      filter = "";
+      render();
+      input.blur();
+    }
+  });
 }
 
 function renderRow(row) {
@@ -461,7 +510,16 @@ function renderRow(row) {
       return;
     }
     render();
-    openFile(row.path);
+    // A single click previews: the tab it opens is the one the next single
+    // click replaces. A double-click below keeps it. The browser sends both
+    // clicks before the dblclick, so the second click finds the tab already
+    // open and only brings it forward.
+    openFile(row.path, { preview: true });
+  });
+  element.addEventListener("dblclick", () => {
+    if (!row.isDirectory) {
+      openFile(row.path, { preview: false });
+    }
   });
 
   // A right click opens nothing. It marks the row its menu is about and leaves
@@ -475,7 +533,8 @@ function renderRow(row) {
     event.preventDefault();
     marked = row.path;
     render();
-    showRowMenu(row, event.clientX, event.clientY);
+    showRowMenu(row, event.clientX, event.clientY)
+      .catch((error) => log.warn("Could not open the row menu:", error));
   });
   return element;
 }
@@ -672,19 +731,39 @@ function unmark() {
   render();
 }
 
-function showRowMenu(row, x, y) {
+async function showRowMenu(row, x, y) {
   if (row.isDirectory) {
     return;
   }
+  // Show, for a file build123d can import - STL, STEP, BREP, DXF, SVG. A
+  // click opens a file, whatever it is, because that is what a click means
+  // everywhere in the tree; an SVG one wants to edit must open in the editor.
+  // Showing is the special action, so it lives here with the other actions.
+  const showable = importerFor(row.path) !== null;
+  // A Makefile's targets, below a line, each as "Make ▸ target" - flat rather
+  // than a submenu, because a right-click on a Makefile is asking for exactly
+  // this list. Read now rather than kept: the file is small, the menu is
+  // rare, and a list read at right-click time is never stale. Only when make
+  // answers on this machine; a Makefile without make is a file like any other.
+  const targets = await makeTargetsFor(row.path);
   showContextMenu({
     x,
     y,
     items: [
+      ...(showable ? [{ id: "show", label: "Show", enabled: true }] : []),
       { id: "rename", label: "Rename…", enabled: true },
       { id: "delete", label: "Delete…", enabled: true },
+      ...(targets.length > 0 ? [{ separator: true }] : []),
+      ...targets.map((target) => ({ id: `make:${target}`, label: `Make \u25b8 ${target}`, enabled: true })),
     ],
     onPick: (id) => {
-      if (id === "rename") {
+      if (id === "show") {
+        unmark();
+        showFile(row.path);
+      } else if (id.startsWith("make:")) {
+        unmark();
+        runMake(row.path, id.slice("make:".length));
+      } else if (id === "rename") {
         beginRenaming(row.path);
       } else if (id === "delete") {
         confirmDelete(row.path).catch((error) => log.warn("Could not delete it:", error));
@@ -698,6 +777,23 @@ function showRowMenu(row, x, y) {
       }
     },
   });
+}
+
+/**
+ * The Make entries a row gets: its targets when it is a Makefile and make is
+ * here, otherwise none. Unreadable is none too - the menu still opens with the
+ * file actions, and the reason is in the log rather than in the way.
+ */
+async function makeTargetsFor(path) {
+  if (!isMakefile(path) || !(await hasMake())) {
+    return [];
+  }
+  try {
+    return makeTargets(await filesystem.readFile(path));
+  } catch (error) {
+    log.warn("Could not read the Makefile:", error);
+    return [];
+  }
 }
 
 /**

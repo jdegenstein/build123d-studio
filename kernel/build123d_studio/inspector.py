@@ -29,6 +29,7 @@ pinned environment: 1200 rows in, 1001 out, the last one Ellipsis. A single
 string has nothing for the printer to truncate.
 """
 
+import inspect
 import json
 import reprlib
 import sys
@@ -133,6 +134,21 @@ IMPLIED_COUNTS = {
     "Vertex": ("faces", "edges", "vertices"),
     "Edge": ("faces", "edges", "vertices"),
     "Face": ("faces",),
+}
+
+# The small geometry types, whose contents are a few attributes rather than a
+# topology: what a click on one should list. A Vertex is a shape with every
+# count implied, so it opened to nothing; its coordinates are what it is. By type name, as the counts are,
+# so build123d is never imported here; every entry is a plain attribute read -
+# measured on real objects, none of these computes anything. A BoundBox used to
+# open to "no further detail", which is the one thing a bounding box is for.
+GEOMETRY_ATTRIBUTES = {
+    "Vertex": ("X", "Y", "Z"),
+    "BoundBox": ("min", "max", "size", "center", "diagonal"),
+    "Vector": ("X", "Y", "Z", "length"),
+    "Location": ("position", "orientation"),
+    "Axis": ("position", "direction"),
+    "Plane": ("origin", "x_dir", "y_dir", "z_dir"),
 }
 
 # How much of a label is worth showing beside a name. A label is meant to be an
@@ -475,6 +491,13 @@ LIBRARY_MODULES = (
 
 _MISSING = object()
 
+# The one underscore name that is shown. A CAD file clicked in the tree is
+# imported on the kernel as `_imported` - underscored so that clicking through a
+# folder of exports leaves one name behind rather than one per file - and the
+# whole point of the click is to look at what arrived, so this pane must not
+# hide it.
+SHOWN_UNDERSCORED = {"_imported"}
+
 
 def _from_library(name, value):
     """True if this name is the very object a known library exports.
@@ -492,7 +515,9 @@ def _from_library(name, value):
 
 
 def _is_interesting(name, value):
-    if name.startswith("_") or name in HIDDEN:
+    if name.startswith("_") and name not in SHOWN_UNDERSCORED:
+        return False
+    if name in HIDDEN:
         return False
 
     if isinstance(value, types.ModuleType):
@@ -513,6 +538,27 @@ def _is_interesting(name, value):
         return False
 
     return not _from_library(name, value)
+
+
+def viewer_defaults():
+    """The viewer defaults the application shows a control for, as JSON.
+
+    Read from the build123d_studio module already loaded in this kernel - the
+    warm-up imports it - and never imported here: this runs on every idle. The
+    value of `reset_camera` is a Camera member, and its name is what travels;
+    anything that is not one is passed as text. A kernel where the module is
+    absent, or where reading raises, answers null for the key rather than
+    failing the refresh that carries it.
+    """
+    module = sys.modules.get("build123d_studio")
+    result = {"reset_camera": None}
+    if module is not None:
+        try:
+            value = module.get_default("reset_camera")
+            result["reset_camera"] = getattr(value, "name", None) or (str(value) if value is not None else None)
+        except Exception:  # noqa: BLE001 - a default that cannot be read is no default
+            pass
+    return json.dumps(result)
 
 
 def variables():
@@ -572,6 +618,54 @@ def variables():
     return json.dumps(rows)
 
 
+def ui_models():
+    """The parameter UI of every @ui-decorated function, as a JSON string.
+
+    One entry per model function found in the namespace, keyed by the name it
+    is bound to, listing its parameters in signature order with the type, the
+    default, the group and the Param - flattened, so the pane reads `group`,
+    `desc`, `interval`, `choice` and `step` beside `name`, `type` and
+    `default`.
+
+    Cheap in the sense variables() is: one attribute read per name, and only a
+    function that carries a dict called `ui` is looked at further. A string
+    for the same reason as there.
+    """
+    namespace = sys.modules["__main__"].__dict__
+    models = {}
+    for name, value in list(namespace.items()):
+        # Only what the decorator made. A method or a class with a `ui`
+        # attribute of its own is not a model, and a dict called `ui` on
+        # something that cannot be called could not be run from the pane.
+        if isinstance(value, types.FunctionType) is False:
+            continue
+        spec = getattr(value, "ui", None)
+        if isinstance(spec, dict) is False:
+            continue
+        parameters = []
+        for parameter, (kind, default, group, param) in spec.items():
+            # A parameter without a default has to be filled in before the
+            # model can run at all; the pane sees null and asks for a value.
+            if default is inspect.Parameter.empty:
+                default = None
+            parameters.append(
+                {
+                    "name": parameter,
+                    "type": getattr(kind, "__name__", str(kind)),
+                    "default": default,
+                    "group": group,
+                    "desc": param.desc,
+                    "interval": param.interval,
+                    "choice": param.choice,
+                    "step": param.step,
+                }
+            )
+        models[str(name)] = parameters
+    # default=str, so that a default the pane cannot show as itself - a Vector,
+    # a Path - still arrives as text rather than breaking the whole reply.
+    return json.dumps(models, default=str)
+
+
 def _build123d_details(value):
     """Facts about a shape that are cheap enough for a click.
 
@@ -604,11 +698,75 @@ def _build123d_details(value):
     details = {}
     deadline = time.monotonic() + DETAIL_BUDGET
     skipped = []
-    implied = IMPLIED_COUNTS.get(type(value).__name__, ())
+    kind = type(value).__name__
+
+    # A geometry type lists its attributes and nothing else: it has no faces to
+    # count. Under the same budget as everything else, for the same reason.
+    # Looked up along the bases, not by the exact name: Pos and Rot are
+    # Locations - `Pos(1, 2, 3)` is `type Pos, base Location` - and opened to
+    # nothing while a Location opened to its position and orientation.
+    geometry = next((cls.__name__ for cls in type(value).__mro__ if cls.__name__ in GEOMETRY_ATTRIBUTES), None)
+    if geometry is not None:
+        for attribute in GEOMETRY_ATTRIBUTES[geometry]:
+            if time.monotonic() >= deadline:
+                skipped.append(attribute)
+                continue
+            try:
+                item = getattr(value, attribute)
+                # BoundBox.center is a method where min and max are attributes;
+                # the table names what to show, not how the type spells it.
+                if callable(item):
+                    item = item()
+                details[attribute] = _short_repr(item)
+            except Exception:  # noqa: BLE001 - an attribute that raises is left out
+                pass
+        if len(skipped) > 0:
+            details["not computed"] = ", ".join(skipped) + f" (over {DETAIL_BUDGET:.0f}s)"
+        return details
+
+    # Anything one-dimensional - an Edge, a Wire, a Line, a Spline, whatever
+    # build123d makes of a curve - answers start_point() and end_point(), and
+    # faces and solids do not: the pair is the test, not a list of type names.
+    # Both are a parameter evaluation, measured well under a millisecond on
+    # each of them. `line @ 0` and `line @ 1` in a script are these two points.
+    one_d = callable(getattr(value, "start_point", None)) and callable(
+        getattr(value, "end_point", None)
+    )
+    if one_d:
+        for label, attribute in (("start", "start_point"), ("end", "end_point")):
+            if time.monotonic() >= deadline:
+                skipped.append(label)
+                continue
+            try:
+                details[label] = _short_repr(getattr(value, attribute)())
+            except Exception:  # noqa: BLE001 - a curve that cannot say is left without
+                pass
+
+    # What kind of curve or surface it is - LINE, CIRCLE, BSPLINE, PLANE,
+    # CYLINDER - which is the first thing anyone asks of an edge or a face
+    # and is not in its repr. A constant-time query on the underlying
+    # geometry, measured at 3-5 µs on every edge and face kind including a
+    # 20,000-segment polyline; the STEP's 5,516 faces answer in 73 ms. Wires,
+    # solids and compounds all say OTHER, which is no information and is left
+    # out; an empty shape raises, and is left out the same way.
+    if time.monotonic() < deadline:
+        try:
+            geom_type = getattr(value, "geom_type", None)
+            name = getattr(geom_type, "name", None)
+            if isinstance(name, str) and name != "OTHER":
+                details["geometry"] = name.lower()
+        except Exception:  # noqa: BLE001 - a shape with no geometry has no row
+            pass
+
+    implied = IMPLIED_COUNTS.get(kind, ())
     counts = []
 
     for label, attribute in (("faces", "faces"), ("edges", "edges"), ("vertices", "vertices")):
         if label in implied:
+            continue
+        # A curve has no faces, and "0 faces" in front of its counts said so
+        # on every one of them.
+        if label == "faces" and one_d:
             continue
         if time.monotonic() >= deadline:
             skipped.append(label)

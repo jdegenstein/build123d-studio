@@ -98,8 +98,12 @@ function positionWithin(menu, x, y) {
 /**
  * Show a menu at a point.
  *
+ * An item with `separator: true` is a line, not a button - the Makefile row's
+ * menu draws one between the file actions and the targets.
+ *
  * @param {{x: number, y: number,
- *          items: Array<{id: string, label: string, enabled: boolean}>,
+ *          items: Array<{id: string, label: string, enabled: boolean}
+ *                       | {separator: true}>,
  *          onPick: (id: string) => void}} options
  */
 export function showContextMenu({ x, y, items, onPick, onClose = null }) {
@@ -114,6 +118,12 @@ export function showContextMenu({ x, y, items, onPick, onClose = null }) {
   menu.setAttribute("role", "menu");
 
   for (const item of items) {
+    if (item.separator === true) {
+      const line = document.createElement("div");
+      line.className = "context-menu-separator";
+      menu.appendChild(line);
+      continue;
+    }
     const button = document.createElement("button");
     button.type = "button";
     button.className = "context-menu-item";
@@ -175,18 +185,33 @@ window.addEventListener("resize", closeContextMenu);
  * @param {string} pane which item table it gets - see clipboard.js
  * @param {string} platform NL_OS, for the way the shortcuts are written
  * @param {() => string} selectedText what a Copy would copy, read at click time
- * @param {(id: string, text: string) => void} onPick
+ * @param {(target: EventTarget) => string[]} [variablesAt] the variables the
+ *   right-click acts on - the explorer's selection, see explorer.js
+ * @param {(id: string, text: string, variables: string[]) => void} onPick
  */
-export function attachContextMenu({ element, pane, platform, selectedText, onPick }) {
+export function attachContextMenu({
+  element,
+  pane,
+  platform,
+  selectedText,
+  variablesAt = () => [],
+  onPick,
+}) {
   element.addEventListener("contextmenu", (event) => {
     // The webview's own menu is cancelled globally in reload.js, on the way up
     // from here. This one is ours and is shown instead.
     const text = selectedText();
+    const variables = variablesAt(event.target);
     showContextMenu({
       x: event.clientX,
       y: event.clientY,
-      items: contextMenuItems({ pane, hasSelection: text !== "", platform }),
-      onPick: (id) => onPick(id, text),
+      items: contextMenuItems({
+        pane,
+        hasSelection: text !== "" || variables.length > 0,
+        platform,
+        hasVariable: variables.length > 0,
+      }),
+      onPick: (id) => onPick(id, text, variables),
     });
   });
 }

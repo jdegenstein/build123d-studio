@@ -1,6 +1,6 @@
 import { events, os } from "@neutralinojs/lib";
 
-import { quoteFor } from "./quoting.js";
+import { quoteFor, shellCommandFor } from "./quoting.js";
 import { createRegistry } from "./running.js";
 import * as log from "./log.js";
 
@@ -114,12 +114,15 @@ export async function spawn(command, { cwd, envs, onStdOut, onStdErr } = {}) {
   // all produce.
   await exportEnvironment(envs);
 
-  log.info(`spawn: cwd=${cwd ?? "(inherited)"} command=${command.slice(0, 300)}`);
+  // See shellCommandFor: on Windows the exit code is otherwise the shell's
+  // opinion rather than the command's.
+  const line = shellCommandFor(NL_OS, command);
+  log.info(`spawn: cwd=${cwd ?? "(inherited)"} command=${line.slice(0, 300)}`);
   let proc;
   try {
     // Deliberately no envs: see exportEnvironment. Passing one is fatal on
     // Windows and lossy everywhere else.
-    proc = await os.spawnProcess(command, { cwd });
+    proc = await os.spawnProcess(line, { cwd });
   } catch (error) {
     log.error("spawnProcess refused to start the process:", error);
     throw error;
@@ -164,6 +167,48 @@ export async function stopRunning() {
 }
 
 /**
+ * Stop what a previous page of this window left running.
+ *
+ * Spawned processes belong to the application process, not to the page. When
+ * WebKit kills the page - measured: a WebContent process at 26 GB after a few
+ * large models, killed at WebKit's 16 GB threshold - it relaunches it and
+ * reloads, and the new page starts a sidecar and a kernel of its own while the
+ * old ones are still there, holding a gigabyte and a Jupyter port each. The
+ * old sidecar's teardown is stdin EOF, which only the application closing its
+ * end delivers; asking Neutralino to end the process is what closes it.
+ *
+ * Before anything is spawned, so the list is exactly the predecessor's. A
+ * fresh start has an empty list.
+ *
+ * @returns {Promise<number>} how many were found
+ */
+export async function stopLeftovers() {
+  let leftovers;
+  try {
+    leftovers = await os.getSpawnedProcesses();
+  } catch (error) {
+    log.warn("Could not list spawned processes:", error);
+    return 0;
+  }
+  if (leftovers.length === 0) {
+    return 0;
+  }
+  log.warn(
+    `${leftovers.length} process(es) left by a previous page of this window - ` +
+      "the page was reloaded, most likely after WebKit killed it; stopping them",
+  );
+  for (const leftover of leftovers) {
+    try {
+      await os.updateSpawnedProcess(leftover.id, "exit");
+      log.info(`stopped leftover: id=${leftover.id} pid=${leftover.pid}`);
+    } catch (error) {
+      log.warn(`Could not stop leftover id=${leftover.id} pid=${leftover.pid}:`, error);
+    }
+  }
+  return leftovers.length;
+}
+
+/**
  * Run a process to completion, streaming its output line-wise to onLine.
  *
  * stdout and stderr are merged, because for uv the interesting progress
@@ -186,6 +231,7 @@ export async function run(command, { cwd, envs, onLine } = {}) {
     }
   };
 
+  const started = performance.now();
   const proc = live.track(
     await spawn(command, { cwd, envs, onStdOut: emit, onStdErr: emit })
   );
@@ -198,6 +244,11 @@ export async function run(command, { cwd, envs, onLine } = {}) {
     // else's process.
     live.forget(proc);
   }
+  // The other half of the `spawn:` line above. A command's exit code was only
+  // ever in the log when a caller chose to mention it, so a failing curl or uv
+  // could leave nothing but its output - and the time says whether it failed
+  // at once or gave up after retries.
+  log.info(`exited: pid=${proc.pid} code=${code} after ${Math.round(performance.now() - started)} ms`);
 
   if (buffer.length > 0 && onLine !== undefined) {
     onLine(buffer);

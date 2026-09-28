@@ -62,7 +62,14 @@ from ocp_viewer_core.tessellator import (
 )
 
 from .comms import StudioComms
+from .otherhosts import install as _warn_about_other_hosts
+from .params import Param, ui
 from .transport import NotConnected
+
+# Say so when another viewer's package is imported into this kernel - see
+# otherhosts.py. Before anything else here runs, so that a cell importing
+# ocp_vscode after this package gets the sentence and not a silent wait.
+_warn_about_other_hosts()
 
 # `NATIVE_TESSELLATOR=1` in the environment turns the ocp_addons accelerator on,
 # and it does nothing at all unless somebody applies it - which is what this
@@ -97,6 +104,7 @@ __all__ = [
     "GoldenRatioColormap",
     "ListedColorMap",
     "NotConnected",
+    "Param",
     "Render",
     "SeededColormap",
     "SegmentedColorMap",
@@ -130,6 +138,7 @@ __all__ = [
     "show_object",
     "show_objects",
     "status",
+    "ui",
     "unset_colormap",
     "web_to_rgb",
     "workspace_config",

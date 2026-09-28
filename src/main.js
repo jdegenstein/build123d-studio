@@ -4,8 +4,9 @@ import "./icons.css";
 
 import { ensureEnvironment } from "./bootstrap/setup.js";
 import { appDir, recordAppLocation } from "./bootstrap/envroot.js";
+import { logStartupFacts } from "./bootstrap/diagnostics.js";
 import { openTarget } from "./args.js";
-import { stopRunning } from "./proc.js";
+import { stopLeftovers, stopRunning } from "./proc.js";
 import {
   acknowledge,
   appendLog,
@@ -23,6 +24,7 @@ import {
 } from "./console/terminal.js";
 import {
   bufferKeys,
+  execute,
   focus as focusEditor,
   hasTextFocus,
   initEditor,
@@ -60,6 +62,7 @@ import {
   checkOpenFilesExist,
   fileRenamed,
   openPath,
+  pinTab,
   restoreWorkspace,
   saveAll,
   saveFile,
@@ -69,6 +72,7 @@ import {
   syncKernelDirectory,
 } from "./editor/files.js";
 import { initTabStrip } from "./editor/tabstrip.js";
+import { importCode } from "./editor/importfile.js";
 import { initSidebar, toggleSidebar } from "./editor/sidebar.js";
 import { chordFromEvent, sameChord } from "./keys.js";
 import { watchNativeLink } from "./nativelink.js";
@@ -76,7 +80,9 @@ import { chordsFor } from "./keybindings.js";
 import { handleKey } from "./titlebar/titlebar.js";
 import { followWindowFocus } from "./nativedialog.js";
 import { initViewer, showLogo } from "./viewer/viewer.js";
-import { initVariables } from "./vars/explorer.js";
+import { initVariables, selectionFor } from "./vars/explorer.js";
+import { hasModels, initParams, toggleParamsPanel } from "./params/panel.js";
+import { initCameraShortcut } from "./camerashortcut.js";
 import { awaitKernelRestart, showSettings } from "./settings.js";
 import { showInfo } from "./info.js";
 import {
@@ -96,7 +102,7 @@ import { appendBackendLine, showConsolePanel } from "./debug/console.js";
 import { anythingUnwell, record as recordHealth, reset as resetHealth } from "./health.js";
 import * as log from "./log.js";
 import { guardAgainstReload, suppressNativeContextMenu } from "./reload.js";
-import { initRunFile, testFile, testFolder, toggleRunFile } from "./run/file.js";
+import { initRunFile, runMake, testFile, testFolder, toggleRunFile } from "./run/file.js";
 import { restoreWindow, saveWindow, watchWindow } from "./windowstate.js";
 
 init();
@@ -546,6 +552,15 @@ async function main() {
   await neuWindow.show();
   watchWindow();
 
+  // Before anything this page spawns, so what is found is the predecessor's:
+  // a reloaded page inherits the application's spawned processes.
+  await stopLeftovers();
+
+  // After the window is up, so a slow answer delays the splash's lines rather
+  // than the window; before the environment, so the machine is described in
+  // the log ahead of whatever the bootstrap has to say about it.
+  await logStartupFacts();
+
   let environment;
   try {
     environment = await ensureEnvironment();
@@ -568,11 +583,20 @@ async function main() {
   initTabStrip({
     onSelect: (key) => withTitle(() => selectTab(key)),
     onClose: (key) => withTitle(() => closeTab(key)),
+    onPin: (key) => pinTab(key),
   });
   // Clicking a file in the tree opens it exactly as Open File does, tab and
   // all - the tree is a way of finding files, not a second kind of buffer.
+  // A CAD file is shown from the row's menu instead: it is imported on the
+  // kernel, and the lines that did it are in the console (importfile.js).
   initSidebar({
-    onOpenFile: (path) => withTitle(() => openPath(path)),
+    onOpenFile: (path, options) => withTitle(() => openPath(path, options)),
+    onShowFile: (path) => {
+      for (const code of importCode(path) ?? []) {
+        execute(code);
+      }
+    },
+    onMake: (makefile, target) => void runMake(makefile, target),
     // A refresh is the only moment this application learns that a file it has
     // open has been deleted from outside - there is no watcher yet.
     onRefreshed: () => {
@@ -583,6 +607,9 @@ async function main() {
   });
   initViewer();
   initVariables();
+  // The menu's toggle is greyed without a model, so it follows the panel.
+  initParams({ onChange: () => void refreshMenu() });
+  initCameraShortcut();
   initToolbar();
   const console_ = initConsole();
 
@@ -611,10 +638,15 @@ async function main() {
   // All four, not just the two with menus: the editor and the viewer never start
   // a document selection of their own, but they are perfectly capable of being
   // dragged *into*, which highlighted Monaco's code and its minimap.
+  //
+  // The console *group*, not the Console tab's host: the Run/Debug and Backend
+  // tabs are its siblings, and a drag begun in either matched nothing here and
+  // ran on into the editor - reported, and reproduced in the harness. The
+  // Console tab never showed it because xterm keeps a selection of its own.
   confineSelection([
     document.getElementById("pane-editor"),
     document.getElementById("pane-viewer"),
-    consolePane,
+    document.getElementById("pane-console-group"),
     varsPane,
   ]);
 
@@ -642,9 +674,20 @@ async function main() {
     // HTML, and what the user dragged across is what Copy means - clamped to
     // this pane, so a drag that reached another one copies only this part.
     selectedText: () => textWithin(varsPane),
-    onPick: (id, text) => {
+    variablesAt: selectionFor,
+    onPick: (id, text, variables) => {
       if (id === "copy") {
-        copyText(text);
+        // The selected names as a list - `a, b, c` - which is what a Copy of
+        // variables is for: pasting them into a show() or a tuple. With no
+        // row selected, whatever text was dragged across, as before.
+        copyText(variables.length > 0 ? variables.join(", ") : text);
+      } else if (id === "show" && variables.length > 0) {
+        // One show of all of them, through the same execute as a Run, echoed
+        // into the console. The import is there for a namespace that never
+        // imported show itself. The names travel too, so the viewer's tree
+        // says "plate" rather than "Solid".
+        const names = variables.map((name) => JSON.stringify(name)).join(", ");
+        execute(`from build123d_studio import show; show(${variables.join(", ")}, names=[${names}])`);
       }
     },
   });
@@ -655,10 +698,11 @@ async function main() {
   watchSession({
     folder: () => currentFolder() !== null,
     tabs: () => bufferKeys().length > 0,
+    model: hasModels,
   });
 
   await initMenu({
-    [MENU.ABOUT]: showInfo,
+    [MENU.ABOUT]: () => showInfo({ onOpen: (path) => withTitle(() => openPath(path)) }),
     [MENU.SETTINGS]: showSettings,
     [MENU.QUIT]: shutdown,
     [MENU.CUT]: cut,
@@ -670,6 +714,7 @@ async function main() {
     [MENU.CLOSE_FOLDER]: () => withMenu(closeFolder),
     [MENU.TOGGLE_SIDEBAR]: toggleSidebar,
     [MENU.TOGGLE_BOTTOM]: toggleBottomRow,
+    [MENU.TOGGLE_PARAMS]: toggleParamsPanel,
     [MENU.SAVE]: () => saveFile(),
     [MENU.SAVE_AS]: () => saveFile({ saveAs: true }),
     [MENU.SAVE_ALL]: () => withMenu(saveAll),
@@ -738,7 +783,7 @@ async function main() {
   // What the Interrupt button above a cell marker does. Handed to the editor
   // rather than imported by it: interrupting belongs to the toolbar, which
   // already imports the editor.
-  setInterrupt(() => void interruptKernel());
+  setInterrupt(() => void interruptKernel("cell lens"));
 
   reloadUserSnippets().catch((error) => log.warn("Could not read the snippets file:", error));
 
@@ -870,4 +915,16 @@ async function main() {
   }
 }
 
-main();
+// What throws before the environment is reached - the log directory that
+// cannot be created, a settings file that cannot be read - used to end main()
+// before neuWindow.show(), leaving a process with no window and nothing on
+// screen to report. The window is raised so the splash can say what happened.
+main().catch(async (error) => {
+  log.error("Startup failed", error);
+  try {
+    await neuWindow.show();
+  } catch {
+    // Not up either; the log line above is what remains.
+  }
+  fail("build123d Studio could not start.", error?.message ?? error);
+});

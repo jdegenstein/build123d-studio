@@ -57,6 +57,7 @@ export const MENU = {
   CLOSE_ALL: "file.closeAll",
   TOGGLE_SIDEBAR: "view.sidebar",
   TOGGLE_BOTTOM: "view.bottom",
+  TOGGLE_PARAMS: "view.params",
   CUT: "edit.cut",
   COPY: "edit.copy",
   PASTE: "edit.paste",
@@ -295,6 +296,7 @@ export function buildMenu({
       menuItems: [
         at(MENU.TOGGLE_SIDEBAR, "Toggle Sidebar"),
         at(MENU.TOGGLE_BOTTOM, "Toggle Console and Variables"),
+        at(MENU.TOGGLE_PARAMS, "Toggle Parameters"),
       ],
     },
     {
